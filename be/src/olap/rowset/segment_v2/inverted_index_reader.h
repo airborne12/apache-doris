@@ -219,6 +219,7 @@ private:
     const TypeInfo* _type_info {};
     const KeyCoder* _value_key_coder {};
     DorisCompoundReader* _compoundReader;
+    std::shared_ptr<lucene::util::bkd::bkd_reader> _reader;
 };
 
 class InvertedIndexIterator {

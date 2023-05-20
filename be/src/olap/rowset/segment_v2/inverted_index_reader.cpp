@@ -467,6 +467,16 @@ BkdIndexReader::BkdIndexReader(io::FileSystemSPtr fs, const std::string& path,
     _compoundReader = new DorisCompoundReader(
             DorisCompoundDirectory::getDirectory(fs, index_dir.c_str()), index_file_name.c_str(),
             config::inverted_index_read_buffer_size);
+    auto st = get_bkd_reader(_reader);
+    if (!st.ok()) {
+        if (!st.ok()) {
+            if (st.code() != ErrorCode::END_OF_FILE) {
+                LOG(WARNING) << "get_bkd_reader for index file " << index_file
+                             << " failed: " << st;
+            }
+            _reader = nullptr;
+        }
+    }
 }
 
 Status BkdIndexReader::new_iterator(const TabletIndex* index_meta, OlapReaderStatistics* stats,
@@ -479,8 +489,11 @@ Status BkdIndexReader::bkd_query(OlapReaderStatistics* stats, const std::string&
                                  const void* query_value, InvertedIndexQueryType query_type,
                                  std::shared_ptr<lucene::util::bkd::bkd_reader>& r,
                                  InvertedIndexVisitor* visitor) {
-    RETURN_IF_ERROR(get_bkd_reader(r));
-    char tmp[r->bytes_per_dim_];
+    //RETURN_IF_ERROR(get_bkd_reader(r));
+    if (_reader == nullptr) {
+        return Status::Error<ErrorCode::INVERTED_INDEX_FILE_NOT_FOUND>();
+    }
+    char tmp[_reader->bytes_per_dim_];
     switch (query_type) {
     case InvertedIndexQueryType::EQUAL_QUERY: {
         _value_key_coder->full_encode_ascending(query_value, &visitor->query_max);
@@ -505,7 +518,7 @@ Status BkdIndexReader::bkd_query(OlapReaderStatistics* stats, const std::string&
         LOG(ERROR) << "invalid query type when query bkd index";
         return Status::Error<ErrorCode::INVERTED_INDEX_NOT_SUPPORTED>();
     }
-    visitor->set_reader(r.get());
+    visitor->set_reader(_reader.get());
     return Status::OK();
 }
 
@@ -525,7 +538,7 @@ Status BkdIndexReader::try_query(OlapReaderStatistics* stats, const std::string&
                          << " failed: " << st.code_as_string();
             return st;
         }
-        *count = r->estimate_point_count(visitor.get());
+        *count = _reader->estimate_point_count(visitor.get());
     } catch (const CLuceneError& e) {
         LOG(WARNING) << "BKD Query CLuceneError Occurred, error msg: " << e.what();
         return Status::Error<ErrorCode::INVERTED_INDEX_CLUCENE_ERROR>();
@@ -575,7 +588,7 @@ Status BkdIndexReader::query(OlapReaderStatistics* stats, const std::string& col
                          << " failed: " << st.code_as_string();
             return st;
         }
-        r->intersect(visitor.get());
+        _reader->intersect(visitor.get());
     } catch (const CLuceneError& e) {
         LOG(WARNING) << "BKD Query CLuceneError Occurred, error msg: " << e.what();
         return Status::Error<ErrorCode::INVERTED_INDEX_CLUCENE_ERROR>();
@@ -588,7 +601,7 @@ Status BkdIndexReader::query(OlapReaderStatistics* stats, const std::string& col
 
     LOG(INFO) << "BKD index search time taken: " << UnixMillis() - start << "ms "
               << " column: " << column_name << " result: " << bit_map->cardinality()
-              << " reader stats: " << r->stats.to_string();
+              << " reader stats: " << _reader->stats.to_string();
     return Status::OK();
 }
 
