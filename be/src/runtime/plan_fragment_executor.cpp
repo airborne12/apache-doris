@@ -101,7 +101,7 @@ PlanFragmentExecutor::~PlanFragmentExecutor() {
 }
 
 Status PlanFragmentExecutor::prepare(const TExecPlanFragmentParams& request,
-                                     QueryContext* query_ctx) {
+                                     std::shared_ptr<QueryContext> query_ctx) {
     OpentelemetryTracer tracer = telemetry::get_noop_tracer();
     if (opentelemetry::trace::Tracer::GetCurrentSpan()->GetContext().IsValid()) {
         tracer = telemetry::get_tracer(print_id(_query_id));

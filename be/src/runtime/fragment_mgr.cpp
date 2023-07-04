@@ -238,7 +238,7 @@ Status FragmentExecState::prepare(const TExecPlanFragmentParams& params) {
     if (_query_ctx == nullptr) {
         return _executor.prepare(params);
     } else {
-        return _executor.prepare(params, _query_ctx.get());
+        return _executor.prepare(params, _query_ctx);
     }
 }
 

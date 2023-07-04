@@ -359,9 +359,9 @@ public:
 
     RuntimeFilterMgr* runtime_filter_mgr() { return _runtime_filter_mgr.get(); }
 
-    void set_query_ctx(QueryContext* ctx) { _query_ctx = ctx; }
+    void set_query_ctx(std::shared_ptr<QueryContext> ctx) { _query_ctx = ctx; }
 
-    QueryContext* get_query_ctx() { return _query_ctx; }
+    QueryContext* get_query_ctx() { return _query_ctx.get(); }
 
     void set_query_mem_tracker(const std::shared_ptr<MemTrackerLimiter>& tracker) {
         _query_mem_tracker = tracker;
@@ -506,7 +506,7 @@ private:
     std::vector<TTabletCommitInfo> _tablet_commit_infos;
     std::vector<TErrorTabletInfo> _error_tablet_infos;
 
-    QueryContext* _query_ctx;
+    std::shared_ptr<QueryContext> _query_ctx;
 
     // true if max_filter_ratio is 0
     bool _load_zero_tolerance = false;
