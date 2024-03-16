@@ -254,7 +254,8 @@ Status FullTextIndexReader::new_iterator(OlapReaderStatistics* stats, RuntimeSta
 
 Status FullTextIndexReader::query(OlapReaderStatistics* stats, RuntimeState* runtime_state,
                                   const std::string& column_name, const void* query_value,
-                                  InvertedIndexQueryType query_type, roaring::Roaring* bit_map) {
+                                  InvertedIndexQueryType query_type,
+                                  std::shared_ptr<roaring::Roaring>& bit_map) {
     SCOPED_RAW_TIMER(&stats->inverted_index_query_timer);
 
     std::string search_str = reinterpret_cast<const StringRef*>(query_value)->to_string();
@@ -302,7 +303,6 @@ Status FullTextIndexReader::query(OlapReaderStatistics* stats, RuntimeState* run
         std::unique_ptr<lucene::search::Query> query;
         std::wstring field_ws = std::wstring(column_name.begin(), column_name.end());
 
-        roaring::Roaring query_match_bitmap;
         if (query_type == InvertedIndexQueryType::MATCH_PHRASE_QUERY ||
             query_type == InvertedIndexQueryType::MATCH_PHRASE_PREFIX_QUERY ||
             query_type == InvertedIndexQueryType::MATCH_PHRASE_EDGE_QUERY ||
@@ -338,10 +338,8 @@ Status FullTextIndexReader::query(OlapReaderStatistics* stats, RuntimeState* run
             }
             term_match_bitmap->runOptimize();
             cache->insert(cache_key, term_match_bitmap, &cache_handler);
+            bit_map = term_match_bitmap;
         }
-        query_match_bitmap = *term_match_bitmap;
-
-        bit_map->swap(query_match_bitmap);
         return Status::OK();
     } catch (const CLuceneError& e) {
         return Status::Error<ErrorCode::INVERTED_INDEX_CLUCENE_ERROR>(
@@ -386,7 +384,7 @@ Status StringTypeInvertedIndexReader::query(OlapReaderStatistics* stats,
                                             RuntimeState* runtime_state,
                                             const std::string& column_name, const void* query_value,
                                             InvertedIndexQueryType query_type,
-                                            roaring::Roaring* bit_map) {
+                                            std::shared_ptr<roaring::Roaring>& bit_map) {
     SCOPED_RAW_TIMER(&stats->inverted_index_query_timer);
 
     const auto* search_query = reinterpret_cast<const StringRef*>(query_value);
@@ -505,7 +503,7 @@ Status StringTypeInvertedIndexReader::query(OlapReaderStatistics* stats,
         term_match_bitmap->runOptimize();
         cache->insert(cache_key, term_match_bitmap, &cache_handler);
 
-        bit_map->swap(result);
+        bit_map = term_match_bitmap;
     }
     return Status::OK();
 }
@@ -597,12 +595,12 @@ Status BkdIndexReader::invoke_bkd_try_query(const void* query_value,
 
 Status BkdIndexReader::invoke_bkd_query(const void* query_value, InvertedIndexQueryType query_type,
                                         std::shared_ptr<lucene::util::bkd::bkd_reader> r,
-                                        roaring::Roaring* bit_map) {
+                                        std::shared_ptr<roaring::Roaring>& bit_map) {
     switch (query_type) {
     case InvertedIndexQueryType::LESS_THAN_QUERY: {
         auto visitor =
                 std::make_unique<InvertedIndexVisitor<InvertedIndexQueryType::LESS_THAN_QUERY>>(
-                        r.get(), bit_map);
+                        r.get(), bit_map.get());
         RETURN_IF_ERROR(construct_bkd_query_value(query_value, r, visitor.get()));
         r->intersect(visitor.get());
         break;
@@ -610,7 +608,7 @@ Status BkdIndexReader::invoke_bkd_query(const void* query_value, InvertedIndexQu
     case InvertedIndexQueryType::LESS_EQUAL_QUERY: {
         auto visitor =
                 std::make_unique<InvertedIndexVisitor<InvertedIndexQueryType::LESS_EQUAL_QUERY>>(
-                        r.get(), bit_map);
+                        r.get(), bit_map.get());
         RETURN_IF_ERROR(construct_bkd_query_value(query_value, r, visitor.get()));
         r->intersect(visitor.get());
         break;
@@ -618,7 +616,7 @@ Status BkdIndexReader::invoke_bkd_query(const void* query_value, InvertedIndexQu
     case InvertedIndexQueryType::GREATER_THAN_QUERY: {
         auto visitor =
                 std::make_unique<InvertedIndexVisitor<InvertedIndexQueryType::GREATER_THAN_QUERY>>(
-                        r.get(), bit_map);
+                        r.get(), bit_map.get());
         RETURN_IF_ERROR(construct_bkd_query_value(query_value, r, visitor.get()));
         r->intersect(visitor.get());
         break;
@@ -626,14 +624,14 @@ Status BkdIndexReader::invoke_bkd_query(const void* query_value, InvertedIndexQu
     case InvertedIndexQueryType::GREATER_EQUAL_QUERY: {
         auto visitor =
                 std::make_unique<InvertedIndexVisitor<InvertedIndexQueryType::GREATER_EQUAL_QUERY>>(
-                        r.get(), bit_map);
+                        r.get(), bit_map.get());
         RETURN_IF_ERROR(construct_bkd_query_value(query_value, r, visitor.get()));
         r->intersect(visitor.get());
         break;
     }
     case InvertedIndexQueryType::EQUAL_QUERY: {
         auto visitor = std::make_unique<InvertedIndexVisitor<InvertedIndexQueryType::EQUAL_QUERY>>(
-                r.get(), bit_map);
+                r.get(), bit_map.get());
         RETURN_IF_ERROR(construct_bkd_query_value(query_value, r, visitor.get()));
         r->intersect(visitor.get());
         break;
@@ -662,10 +660,10 @@ Status BkdIndexReader::try_query(OlapReaderStatistics* stats, const std::string&
                                                      query_type, query_str};
         auto* cache = InvertedIndexQueryCache::instance();
         InvertedIndexQueryCacheHandle cache_handler;
-        roaring::Roaring bit_map;
-        auto cache_status = handle_query_cache(cache, cache_key, &cache_handler, stats, &bit_map);
+        std::shared_ptr<roaring::Roaring> bit_map;
+        auto cache_status = handle_query_cache(cache, cache_key, &cache_handler, stats, bit_map);
         if (cache_status.ok()) {
-            *count = bit_map.cardinality();
+            *count = bit_map->cardinality();
             return Status::OK();
         }
 
@@ -681,7 +679,8 @@ Status BkdIndexReader::try_query(OlapReaderStatistics* stats, const std::string&
 
 Status BkdIndexReader::query(OlapReaderStatistics* stats, RuntimeState* runtime_state,
                              const std::string& column_name, const void* query_value,
-                             InvertedIndexQueryType query_type, roaring::Roaring* bit_map) {
+                             InvertedIndexQueryType query_type,
+                             std::shared_ptr<roaring::Roaring>& bit_map) {
     SCOPED_RAW_TIMER(&stats->inverted_index_query_timer);
 
     try {
@@ -705,10 +704,8 @@ Status BkdIndexReader::query(OlapReaderStatistics* stats, RuntimeState* runtime_
         }
 
         RETURN_IF_ERROR(invoke_bkd_query(query_value, query_type, r, bit_map));
-        std::shared_ptr<roaring::Roaring> query_bitmap =
-                std::make_shared<roaring::Roaring>(*bit_map);
-        query_bitmap->runOptimize();
-        cache->insert(cache_key, query_bitmap, &cache_handler);
+        bit_map->runOptimize();
+        cache->insert(cache_key, bit_map, &cache_handler);
 
         VLOG_DEBUG << "BKD index search column: " << column_name
                    << " result: " << bit_map->cardinality();
@@ -1128,11 +1125,9 @@ lucene::util::bkd::relation InvertedIndexVisitor<QT>::compare(std::vector<uint8_
     }
 }
 
-Status InvertedIndexIterator::read_from_inverted_index(const std::string& column_name,
-                                                       const void* query_value,
-                                                       InvertedIndexQueryType query_type,
-                                                       uint32_t segment_num_rows,
-                                                       roaring::Roaring* bit_map, bool skip_try) {
+Status InvertedIndexIterator::read_from_inverted_index(
+        const std::string& column_name, const void* query_value, InvertedIndexQueryType query_type,
+        uint32_t segment_num_rows, std::shared_ptr<roaring::Roaring>& bit_map, bool skip_try) {
     if (UNLIKELY(_reader == nullptr)) {
         throw CLuceneError(CL_ERR_NullPointer, "bkd index reader is null", false);
     }
