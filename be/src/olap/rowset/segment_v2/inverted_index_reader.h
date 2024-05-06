@@ -20,6 +20,7 @@
 #include <CLucene/util/bkd/bkd_reader.h>
 #include <stdint.h>
 
+#include <boost/compute/detail/lru_cache.hpp>
 #include <memory>
 #include <string>
 #include <utility>
@@ -46,6 +47,8 @@
         FINALIZE_INPUT(x)         \
     } catch (...) {               \
     }
+
+using namespace boost::compute::detail;
 
 namespace lucene {
 namespace store {
@@ -81,6 +84,8 @@ public:
         _index_dir = io_path.parent_path();
         _index_file_name = InvertedIndexDescriptor::get_index_file_name(
                 io_path.filename(), index_meta->index_id(), index_meta->get_index_suffix());
+        _cache = std::make_unique<lru_cache<std::string, std::shared_ptr<roaring::Roaring>>>(
+                config::inverted_index_query_cache_limits_per_segment);
     }
     virtual ~InvertedIndexReader() = default;
 
@@ -95,7 +100,8 @@ public:
                              const void* query_value, InvertedIndexQueryType query_type,
                              uint32_t* count) = 0;
 
-    Status read_null_bitmap(InvertedIndexQueryCacheHandle* cache_handle,
+    Status read_null_bitmap(const std::string& column_name,
+                            std::shared_ptr<roaring::Roaring>& bit_map,
                             lucene::store::Directory* dir = nullptr);
 
     virtual InvertedIndexReaderType type() = 0;
@@ -119,15 +125,16 @@ public:
     static std::unique_ptr<lucene::analysis::Analyzer> create_analyzer(
             InvertedIndexCtx* inverted_index_ctx);
 
-    virtual Status handle_query_cache(InvertedIndexQueryCache* cache,
-                                      const InvertedIndexQueryCache::CacheKey& cache_key,
-                                      InvertedIndexQueryCacheHandle* cache_handler,
+    virtual Status handle_query_cache(const InvertedIndexQueryCache::CacheKey& cache_key,
                                       OlapReaderStatistics* stats,
                                       std::shared_ptr<roaring::Roaring>& bit_map) {
-        if (cache->lookup(cache_key, cache_handler)) {
+        std::unique_lock<std::shared_mutex> lock(_cache_mutex);
+        auto result = _cache->get(cache_key.encode());
+
+        if (result) {
             stats->inverted_index_query_cache_hit++;
             SCOPED_RAW_TIMER(&stats->inverted_index_query_bitmap_copy_timer);
-            bit_map = cache_handler->get_bitmap();
+            bit_map = *result;
             return Status::OK();
         }
         stats->inverted_index_query_cache_miss++;
@@ -150,6 +157,8 @@ protected:
     std::string _index_file_name;
     io::Path _index_dir;
     bool _has_null {true};
+    std::unique_ptr<lru_cache<std::string, std::shared_ptr<roaring::Roaring>>> _cache;
+    mutable std::shared_mutex _cache_mutex;
 };
 
 class FullTextIndexReader : public InvertedIndexReader {
@@ -182,9 +191,6 @@ private:
                               const std::vector<std::string>& analyse_result,
                               const FulltextIndexSearcherPtr& index_searcher,
                               const std::shared_ptr<roaring::Roaring>& term_match_bitmap);
-
-    void check_null_bitmap(const FulltextIndexSearcherPtr& index_searcher,
-                           bool& null_bitmap_already_read);
 };
 
 class StringTypeInvertedIndexReader : public InvertedIndexReader {
@@ -298,9 +304,10 @@ public:
     Status try_read_from_inverted_index(const std::string& column_name, const void* query_value,
                                         InvertedIndexQueryType query_type, uint32_t* count);
 
-    Status read_null_bitmap(InvertedIndexQueryCacheHandle* cache_handle,
+    Status read_null_bitmap(const std::string& column_name,
+                            std::shared_ptr<roaring::Roaring>& bit_map,
                             lucene::store::Directory* dir = nullptr) {
-        return _reader->read_null_bitmap(cache_handle, dir);
+        return _reader->read_null_bitmap(column_name, bit_map, dir);
     }
 
     [[nodiscard]] InvertedIndexReaderType get_inverted_index_reader_type() const;

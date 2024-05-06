@@ -143,24 +143,29 @@ void InvertedIndexReader::get_analyse_result(std::vector<std::string>& analyse_r
     }
 }
 
-Status InvertedIndexReader::read_null_bitmap(InvertedIndexQueryCacheHandle* cache_handle,
+Status InvertedIndexReader::read_null_bitmap(const std::string& column_name,
+                                             std::shared_ptr<roaring::Roaring>& bit_map,
                                              lucene::store::Directory* dir) {
     lucene::store::IndexInput* null_bitmap_in = nullptr;
     bool owned_dir = false;
     try {
         // try to get query bitmap result from cache and return immediately on cache hit
+        InvertedIndexQueryCache::CacheKey cache_key {
+                "", column_name, InvertedIndexQueryType::UNKNOWN_QUERY, "null_bitmap"};
+        {
+            std::unique_lock<std::shared_mutex> lock(_cache_mutex);
+            //auto* cache = InvertedIndexQueryCache::instance();
+            auto result = _cache->get(cache_key.encode());
+            if (result) {
+                bit_map = *result;
+                return Status::OK();
+            }
+        }
         io::Path path(_path);
         auto index_dir = path.parent_path();
         auto index_file_name = InvertedIndexDescriptor::get_index_file_name(
                 path.filename(), _index_meta.index_id(), _index_meta.get_index_suffix());
         auto index_file_path = index_dir / index_file_name;
-        InvertedIndexQueryCache::CacheKey cache_key {
-                index_file_path, "", InvertedIndexQueryType::UNKNOWN_QUERY, "null_bitmap"};
-        auto* cache = InvertedIndexQueryCache::instance();
-        if (cache->lookup(cache_key, cache_handle)) {
-            return Status::OK();
-        }
-
         if (!dir) {
             dir = new DorisCompoundReader(
                     DorisCompoundDirectoryFactory::getDirectory(_fs, index_dir.c_str()),
@@ -179,7 +184,11 @@ Status InvertedIndexReader::read_null_bitmap(InvertedIndexQueryCacheHandle* cach
             null_bitmap_in->readBytes(reinterpret_cast<uint8_t*>(buf.data()), null_bitmap_size);
             *null_bitmap = roaring::Roaring::read(reinterpret_cast<char*>(buf.data()), false);
             null_bitmap->runOptimize();
-            cache->insert(cache_key, null_bitmap, cache_handle);
+            {
+                std::unique_lock<std::shared_mutex> lock(_cache_mutex);
+                _cache->insert(cache_key.encode(), null_bitmap);
+                bit_map = null_bitmap;
+            }
             FINALIZE_INPUT(null_bitmap_in);
         }
         if (owned_dir) {
@@ -311,13 +320,13 @@ Status FullTextIndexReader::query(OlapReaderStatistics* stats, RuntimeState* run
             query_type == InvertedIndexQueryType::MATCH_ANY_QUERY) {
             std::string str_tokens = join(analyse_result, " ");
 
-            cache_key = {_index_dir / _index_file_name, column_name, query_type, str_tokens};
+            cache_key = {"", column_name, query_type, str_tokens};
         }
-        auto* cache = InvertedIndexQueryCache::instance();
-        InvertedIndexQueryCacheHandle cache_handler;
+        //auto* cache = InvertedIndexQueryCache::instance();
+        //InvertedIndexQueryCacheHandle cache_handler;
 
         std::shared_ptr<roaring::Roaring> term_match_bitmap = nullptr;
-        auto cache_status = handle_query_cache(cache, cache_key, &cache_handler, stats, bit_map);
+        auto cache_status = handle_query_cache(cache_key, stats, bit_map);
         if (cache_status.ok()) {
             return Status::OK();
         }
@@ -337,8 +346,11 @@ Status FullTextIndexReader::query(OlapReaderStatistics* stats, RuntimeState* run
                 return res;
             }
             term_match_bitmap->runOptimize();
-            cache->insert(cache_key, term_match_bitmap, &cache_handler);
-            bit_map = term_match_bitmap;
+            {
+                std::unique_lock<std::shared_mutex> lock(_cache_mutex);
+                _cache->insert(cache_key.encode(), term_match_bitmap);
+                bit_map = term_match_bitmap;
+            }
         }
         return Status::OK();
     } catch (const CLuceneError& e) {
@@ -401,20 +413,20 @@ Status StringTypeInvertedIndexReader::query(OlapReaderStatistics* stats,
             [](lucene::index::Term* term) { _CLDECDELETE(term); }};
     std::unique_ptr<lucene::search::Query> query;
 
-    auto index_file_path = _index_dir / _index_file_name;
+    //auto index_file_path = _index_dir / _index_file_name;
 
     // try to get query bitmap result from cache and return immediately on cache hit
-    InvertedIndexQueryCache::CacheKey cache_key {index_file_path, column_name, query_type,
-                                                 search_str};
-    auto* cache = InvertedIndexQueryCache::instance();
-    InvertedIndexQueryCacheHandle cache_handler;
+    InvertedIndexQueryCache::CacheKey cache_key {"", column_name, query_type, search_str};
+    //auto* cache = InvertedIndexQueryCache::instance();
+    //InvertedIndexQueryCacheHandle cache_handler;
 
-    auto cache_status = handle_query_cache(cache, cache_key, &cache_handler, stats, bit_map);
+    auto cache_status = handle_query_cache(cache_key, stats, bit_map);
     if (cache_status.ok()) {
         return Status::OK();
     }
 
     roaring::Roaring result;
+    roaring::BulkContext bulk_context;
     FulltextIndexSearcherPtr* searcher_ptr = nullptr;
     InvertedIndexCacheHandle inverted_index_cache_handle;
     RETURN_IF_ERROR(handle_searcher_cache(&inverted_index_cache_handle, stats));
@@ -423,8 +435,8 @@ Status StringTypeInvertedIndexReader::query(OlapReaderStatistics* stats,
     if (searcher_ptr != nullptr) {
         // try to reuse index_searcher's directory to read null_bitmap to cache
         // to avoid open directory additionally for null_bitmap
-        InvertedIndexQueryCacheHandle null_bitmap_cache_handle;
-        static_cast<void>(read_null_bitmap(&null_bitmap_cache_handle,
+        std::shared_ptr<roaring::Roaring> null_bitmap = std::make_shared<roaring::Roaring>();
+        static_cast<void>(read_null_bitmap(column_name, null_bitmap,
                                            (*searcher_ptr)->getReader()->directory()));
 
         try {
@@ -448,9 +460,9 @@ Status StringTypeInvertedIndexReader::query(OlapReaderStatistics* stats,
                 SCOPED_RAW_TIMER(&stats->inverted_index_searcher_search_timer);
                 (*searcher_ptr)
                         ->_search(query.get(),
-                                  [&result](const int32_t docid, const float_t /*score*/) {
+                                  [&result, &bulk_context](const int32_t docid, const float_t /*score*/) {
                                       // docid equal to rowid in segment
-                                      result.add(docid);
+                                      result.addBulk(bulk_context, docid);
                                   });
                 break;
             }
@@ -474,8 +486,8 @@ Status StringTypeInvertedIndexReader::query(OlapReaderStatistics* stats,
                 SCOPED_RAW_TIMER(&stats->inverted_index_searcher_search_timer);
                 (*searcher_ptr)
                         ->_search(query.get(),
-                                  [&result](const int32_t docid, const float_t /*score*/) {
-                                      result.add(docid);
+                                  [&result, &bulk_context](const int32_t docid, const float_t /*score*/) {
+                                      result.addBulk(bulk_context, docid);
                                   });
                 break;
             }
@@ -501,9 +513,11 @@ Status StringTypeInvertedIndexReader::query(OlapReaderStatistics* stats,
         std::shared_ptr<roaring::Roaring> term_match_bitmap =
                 std::make_shared<roaring::Roaring>(result);
         term_match_bitmap->runOptimize();
-        cache->insert(cache_key, term_match_bitmap, &cache_handler);
-
-        bit_map = term_match_bitmap;
+        {
+            std::unique_lock<std::shared_mutex> lock(_cache_mutex);
+            _cache->insert(cache_key.encode(), term_match_bitmap);
+            bit_map = term_match_bitmap;
+        }
     }
     return Status::OK();
 }
@@ -656,12 +670,11 @@ Status BkdIndexReader::try_query(OlapReaderStatistics* stats, const std::string&
         std::string query_str;
         _value_key_coder->full_encode_ascending(query_value, &query_str);
 
-        InvertedIndexQueryCache::CacheKey cache_key {_index_dir / _index_file_name, column_name,
-                                                     query_type, query_str};
-        auto* cache = InvertedIndexQueryCache::instance();
-        InvertedIndexQueryCacheHandle cache_handler;
+        InvertedIndexQueryCache::CacheKey cache_key {"", column_name, query_type, query_str};
+        //auto* cache = InvertedIndexQueryCache::instance();
+        //InvertedIndexQueryCacheHandle cache_handler;
         std::shared_ptr<roaring::Roaring> bit_map;
-        auto cache_status = handle_query_cache(cache, cache_key, &cache_handler, stats, bit_map);
+        auto cache_status = handle_query_cache(cache_key, stats, bit_map);
         if (cache_status.ok()) {
             *count = bit_map->cardinality();
             return Status::OK();
@@ -694,19 +707,21 @@ Status BkdIndexReader::query(OlapReaderStatistics* stats, RuntimeState* runtime_
         std::string query_str;
         _value_key_coder->full_encode_ascending(query_value, &query_str);
 
-        InvertedIndexQueryCache::CacheKey cache_key {_index_dir / _index_file_name, column_name,
-                                                     query_type, query_str};
-        auto* cache = InvertedIndexQueryCache::instance();
-        InvertedIndexQueryCacheHandle cache_handler;
-        auto cache_status = handle_query_cache(cache, cache_key, &cache_handler, stats, bit_map);
+        InvertedIndexQueryCache::CacheKey cache_key {"", column_name, query_type, query_str};
+        //auto* cache = InvertedIndexQueryCache::instance();
+        //InvertedIndexQueryCacheHandle cache_handler;
+        auto cache_status = handle_query_cache(cache_key, stats, bit_map);
         if (cache_status.ok()) {
             return Status::OK();
         }
 
         RETURN_IF_ERROR(invoke_bkd_query(query_value, query_type, r, bit_map));
         bit_map->runOptimize();
-        cache->insert(cache_key, bit_map, &cache_handler);
-
+        {
+            std::unique_lock<std::shared_mutex> lock(_cache_mutex);
+            std::shared_ptr<roaring::Roaring> cache_bitmap = bit_map;
+            _cache->insert(cache_key.encode(), cache_bitmap);
+        }
         VLOG_DEBUG << "BKD index search column: " << column_name
                    << " result: " << bit_map->cardinality();
 

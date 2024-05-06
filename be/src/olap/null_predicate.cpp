@@ -56,10 +56,10 @@ Status NullPredicate::evaluate(BitmapIndexIterator* iterator, uint32_t num_rows,
 Status NullPredicate::evaluate(const vectorized::NameAndTypePair& name_with_type,
                                InvertedIndexIterator* iterator, uint32_t num_rows,
                                roaring::Roaring* bitmap) const {
+    auto column_name = name_with_type.first;
     if (iterator->has_null()) {
-        InvertedIndexQueryCacheHandle null_bitmap_cache_handle;
-        RETURN_IF_ERROR(iterator->read_null_bitmap(&null_bitmap_cache_handle));
-        std::shared_ptr<roaring::Roaring> null_bitmap = null_bitmap_cache_handle.get_bitmap();
+        std::shared_ptr<roaring::Roaring> null_bitmap;
+        RETURN_IF_ERROR(iterator->read_null_bitmap(column_name, null_bitmap));
 
         if (null_bitmap) {
             if (_is_null) {
