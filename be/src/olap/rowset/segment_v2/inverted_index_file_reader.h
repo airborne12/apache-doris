@@ -69,12 +69,14 @@ public:
     Result<InvertedIndexDirectoryMap> get_all_directories();
     // open file v2, init _stream
     int64_t get_inverted_file_size() const { return _stream == nullptr ? 0 : _stream->length(); }
+    friend InvertedIndexFileWriter;
 
-private:
+protected:
     Status _init_from_v2(int32_t read_buffer_size);
     Result<std::unique_ptr<DorisCompoundReader>> _open(int64_t index_id,
                                                        const std::string& index_suffix) const;
 
+private:
     IndicesEntriesMap _indices_entries;
     std::unique_ptr<CL_NS(store)::IndexInput> _stream = nullptr;
     const io::FileSystemSPtr _fs;
