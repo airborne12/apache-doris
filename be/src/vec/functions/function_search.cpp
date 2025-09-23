@@ -468,6 +468,14 @@ Status FunctionSearch::evaluate_inverted_index_with_search_param(
             doc = scorer->advance();
         }
 
+        if (root_clause_type == "NOT") {
+            roaring::Roaring all_docs;
+            all_docs.addRange(0, num_rows);
+            all_docs -= *roaring;
+            *roaring = std::move(all_docs);
+            matched_docs = cast_set<uint32_t>(roaring->cardinality());
+        }
+
         LOG(INFO) << "search: Multi-value query completed, matched " << matched_docs
                   << " documents";
 
