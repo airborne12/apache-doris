@@ -101,6 +101,13 @@ public:
             const std::vector<vectorized::IndexFieldNameAndTypePair>& data_type_with_names,
             std::vector<segment_v2::IndexIterator*> iterators, uint32_t num_rows,
             segment_v2::InvertedIndexResultBitmap& bitmap_result) const override;
+
+    void set_analyzer_identity(const std::string& key) const { _analyzer_key = key; }
+    const std::string& analyzer_identity() const { return _analyzer_key; }
+    void ensure_analyzer_identity(const InvertedIndexCtx* ctx) const;
+
+private:
+    mutable std::string _analyzer_key = INVERTED_INDEX_DEFAULT_ANALYZER_KEY;
 };
 
 class FunctionMatchAny : public FunctionMatchBase {

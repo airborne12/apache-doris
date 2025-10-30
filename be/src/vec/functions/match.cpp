@@ -27,11 +27,27 @@
 
 namespace doris::vectorized {
 #include "common/compile_check_begin.h"
+void FunctionMatchBase::ensure_analyzer_identity(const InvertedIndexCtx* ctx) const {
+    if (ctx != nullptr) {
+        if (!ctx->analyzer_key.empty()) {
+            if (_analyzer_key.empty() || _analyzer_key == INVERTED_INDEX_DEFAULT_ANALYZER_KEY) {
+                _analyzer_key = ctx->analyzer_key;
+                return;
+            }
+        }
+        if (_analyzer_key.empty()) {
+            _analyzer_key = build_analyzer_identity_from_ctx(*ctx);
+        }
+    } else if (_analyzer_key.empty()) {
+        _analyzer_key = INVERTED_INDEX_DEFAULT_ANALYZER_KEY;
+    }
+}
 Status FunctionMatchBase::evaluate_inverted_index(
         const ColumnsWithTypeAndName& arguments,
         const std::vector<vectorized::IndexFieldNameAndTypePair>& data_type_with_names,
         std::vector<segment_v2::IndexIterator*> iterators, uint32_t num_rows,
         segment_v2::InvertedIndexResultBitmap& bitmap_result) const {
+    ensure_analyzer_identity(nullptr);
     DCHECK(arguments.size() == 1);
     DCHECK(data_type_with_names.size() == 1);
     DCHECK(iterators.size() == 1);
@@ -72,6 +88,8 @@ Status FunctionMatchBase::evaluate_inverted_index(
     param.query_type = get_query_type_from_fn_name();
     param.num_rows = num_rows;
     param.roaring = std::make_shared<roaring::Roaring>();
+    param.analyzer_key = _analyzer_key.empty() ? INVERTED_INDEX_DEFAULT_ANALYZER_KEY
+                                               : _analyzer_key;
     if (is_string_type(param_type)) {
         RETURN_IF_ERROR(iter->read_from_index(&param));
     } else {
@@ -143,6 +161,7 @@ Status FunctionMatchBase::execute_impl(FunctionContext* context, Block& block,
     ColumnUInt8::Container& vec_res = res->get_data();
     // set default value to 0, and match functions only need to set 1/true
     vec_res.resize_fill(input_rows_count);
+    ensure_analyzer_identity(inverted_index_ctx);
     RETURN_IF_ERROR(execute_match(context, column_name, match_query_str, input_rows_count, values,
                                   inverted_index_ctx,
                                   (array_col ? &(array_col->get_offsets()) : nullptr), vec_res));

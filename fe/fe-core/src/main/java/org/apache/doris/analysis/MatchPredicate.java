@@ -35,6 +35,9 @@ import com.google.common.base.Preconditions;
 import com.google.common.collect.Lists;
 import com.google.gson.annotations.SerializedName;
 
+import com.google.common.base.Strings;
+
+import java.util.Collections;
 import java.util.Map;
 import java.util.Objects;
 
@@ -148,17 +151,14 @@ public class MatchPredicate extends Predicate {
 
     @SerializedName("op")
     private Operator op;
-    private String invertedIndexParser;
-    private String invertedIndexParserMode;
-    private Map<String, String> invertedIndexCharFilter;
-    private boolean invertedIndexParserLowercase = true;
-    private String invertedIndexParserStopwords = "";
-    private String invertedIndexCustomAnalyzer = "";
+    private String selectedAnalyzer = "";
+    private String selectedParser = "";
+    private String explicitAnalyzer = "";
 
     private MatchPredicate() {
         // use for serde only
-        invertedIndexParser = InvertedIndexUtil.INVERTED_INDEX_PARSER_UNKNOWN;
-        invertedIndexParserMode = InvertedIndexUtil.INVERTED_INDEX_PARSER_FINE_GRANULARITY;
+        selectedAnalyzer = "";
+        selectedParser = "";
     }
 
     public MatchPredicate(Operator op, Expr e1, Expr e2) {
@@ -170,19 +170,14 @@ public class MatchPredicate extends Predicate {
         children.add(e2);
         // TODO: Calculate selectivity
         selectivity = Expr.DEFAULT_SELECTIVITY;
-        invertedIndexParser = InvertedIndexUtil.INVERTED_INDEX_PARSER_UNKNOWN;
-        invertedIndexParserMode = InvertedIndexUtil.INVERTED_INDEX_PARSER_FINE_GRANULARITY;
     }
 
     protected MatchPredicate(MatchPredicate other) {
         super(other);
         op = other.op;
-        invertedIndexParser = other.invertedIndexParser;
-        invertedIndexParserMode = other.invertedIndexParserMode;
-        invertedIndexCharFilter = other.invertedIndexCharFilter;
-        invertedIndexParserLowercase = other.invertedIndexParserLowercase;
-        invertedIndexParserStopwords = other.invertedIndexParserStopwords;
-        invertedIndexCustomAnalyzer = other.invertedIndexCustomAnalyzer;
+        selectedAnalyzer = other.selectedAnalyzer;
+        selectedParser = other.selectedParser;
+        explicitAnalyzer = other.explicitAnalyzer;
     }
 
     /**
@@ -190,14 +185,20 @@ public class MatchPredicate extends Predicate {
      */
     public MatchPredicate(Operator op, Expr e1, Expr e2, Type retType,
             NullableMode nullableMode, Index invertedIndex) {
+        this(op, e1, e2, retType, nullableMode, invertedIndex, null);
+    }
+
+    public MatchPredicate(Operator op, Expr e1, Expr e2, Type retType,
+            NullableMode nullableMode, Index invertedIndex, String analyzer) {
         this(op, e1, e2);
-        if (invertedIndex != null) {
-            this.invertedIndexParser = invertedIndex.getInvertedIndexParser();
-            this.invertedIndexParserMode = invertedIndex.getInvertedIndexParserMode();
-            this.invertedIndexCharFilter = invertedIndex.getInvertedIndexCharFilter();
-            this.invertedIndexParserLowercase = invertedIndex.getInvertedIndexParserLowercase();
-            this.invertedIndexParserStopwords = invertedIndex.getInvertedIndexParserStopwords();
-            this.invertedIndexCustomAnalyzer = invertedIndex.getInvertedIndexCustomAnalyzer();
+        AnalyzerSelector.Selection selection = AnalyzerSelector.select(invertedIndex, analyzer);
+        this.selectedAnalyzer = selection.analyzer();
+        this.selectedParser = selection.parser();
+        if (Strings.isNullOrEmpty(this.selectedAnalyzer)) {
+            this.selectedAnalyzer = this.selectedParser;
+        }
+        if (!Strings.isNullOrEmpty(analyzer)) {
+            this.explicitAnalyzer = analyzer.trim();
         }
         fn = new Function(new FunctionName(op.name), Lists.newArrayList(e1.getType(), e2.getType()), retType,
                 false, true, nullableMode);
@@ -217,34 +218,53 @@ public class MatchPredicate extends Predicate {
         if (!super.equals(obj)) {
             return false;
         }
-        return ((MatchPredicate) obj).op == op;
+        MatchPredicate other = (MatchPredicate) obj;
+        return other.op == op
+                && Objects.equals(explicitAnalyzer, other.explicitAnalyzer)
+                && Objects.equals(selectedAnalyzer, other.selectedAnalyzer)
+                && Objects.equals(selectedParser, other.selectedParser);
     }
 
     @Override
     public String toSqlImpl() {
-        return getChild(0).toSql() + " " + op.toString() + " " + getChild(1).toSql();
+        return getChild(0).toSql() + " " + op.toString() + " " + getChild(1).toSql()
+                + analyzerSqlFragment();
     }
 
     @Override
     public String toSqlImpl(boolean disableTableName, boolean needExternalSql, TableType tableType,
             TableIf table) {
         return getChild(0).toSql(disableTableName, needExternalSql, tableType, table) + " " + op.toString() + " "
-                + getChild(1).toSql(disableTableName, needExternalSql, tableType, table);
+                + getChild(1).toSql(disableTableName, needExternalSql, tableType, table)
+                + analyzerSqlFragment();
     }
 
     @Override
     protected void toThrift(TExprNode msg) {
         msg.node_type = TExprNodeType.MATCH_PRED;
         msg.setOpcode(op.getOpcode());
-        msg.match_predicate = new TMatchPredicate(invertedIndexParser, invertedIndexParserMode);
-        msg.match_predicate.setCharFilterMap(invertedIndexCharFilter);
-        msg.match_predicate.setParserLowercase(invertedIndexParserLowercase);
-        msg.match_predicate.setParserStopwords(invertedIndexParserStopwords);
-        msg.match_predicate.setCustomAnalyzer(invertedIndexCustomAnalyzer);
+        TMatchPredicate matchPredicate = new TMatchPredicate();
+        if (!Strings.isNullOrEmpty(selectedAnalyzer)) {
+            matchPredicate.setAnalyzer(selectedAnalyzer);
+        }
+        if (!Strings.isNullOrEmpty(selectedParser)) {
+            matchPredicate.setParser(selectedParser);
+        }
+        msg.match_predicate = matchPredicate;
     }
 
     @Override
     public int hashCode() {
-        return 31 * super.hashCode() + Objects.hashCode(op);
+        return Objects.hash(super.hashCode(), op, explicitAnalyzer, selectedAnalyzer, selectedParser);
+    }
+
+    private String analyzerSqlFragment() {
+        if (explicitAnalyzer == null || explicitAnalyzer.isEmpty()) {
+            return "";
+        }
+        if (explicitAnalyzer.matches("[A-Za-z_][A-Za-z0-9_]*")) {
+            return " USING ANALYZER " + explicitAnalyzer;
+        }
+        return " USING ANALYZER '" + explicitAnalyzer.replace("'", "''") + "'";
     }
 }

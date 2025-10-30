@@ -29,10 +29,12 @@
 #include <gen_cpp/Exprs_types.h>
 #include <glog/logging.h>
 
-#include <cstddef>
+#include <algorithm>
+#include <cctype>
 #include <memory>
-#include <ostream>
+#include <string>
 #include <string_view>
+#include <type_traits>
 #include <vector>
 
 #include "common/status.h"
@@ -44,6 +46,7 @@
 #include "vec/core/column_with_type_and_name.h"
 #include "vec/exprs/vexpr_context.h"
 #include "vec/exprs/vslot_ref.h"
+#include "vec/functions/match.h"
 #include "vec/functions/simple_function_factory.h"
 
 namespace doris {
@@ -56,19 +59,121 @@ namespace doris::vectorized {
 
 using namespace doris::segment_v2;
 
+namespace {
+
+inline std::string normalize_lower(const std::string& value) {
+    std::string normalized(value);
+    for (auto& ch : normalized) {
+        ch = static_cast<char>(std::tolower(static_cast<unsigned char>(ch)));
+    }
+    return normalized;
+}
+
+template <typename T, typename = void>
+struct match_has_analyzer_field : std::false_type {};
+
+template <typename T>
+struct match_has_analyzer_field<T, std::void_t<decltype(std::declval<const T&>().analyzer)>>
+        : std::true_type {};
+
+template <typename T, typename = void>
+struct match_has_parser_field : std::false_type {};
+
+template <typename T>
+struct match_has_parser_field<T, std::void_t<decltype(std::declval<const T&>().parser)>>
+        : std::true_type {};
+
+template <typename T>
+std::string extract_analyzer_name(const T& predicate) {
+    if constexpr (match_has_analyzer_field<T>::value) {
+        return predicate.analyzer;
+    } else {
+        return predicate.custom_analyzer;
+    }
+}
+
+template <typename T>
+bool analyzer_field_is_set(const T& predicate) {
+    if constexpr (match_has_analyzer_field<T>::value) {
+        return predicate.__isset.analyzer;
+    } else {
+        return !predicate.custom_analyzer.empty();
+    }
+}
+
+template <typename T>
+std::string extract_parser_name(const T& predicate) {
+    if constexpr (match_has_parser_field<T>::value) {
+        return predicate.parser;
+    } else {
+        return predicate.parser_type;
+    }
+}
+
+template <typename T>
+bool parser_field_is_set(const T& predicate) {
+    if constexpr (match_has_parser_field<T>::value) {
+        return predicate.__isset.parser;
+    } else {
+        return !predicate.parser_type.empty();
+    }
+}
+
+inline bool looks_like_builtin_analyzer(const std::string& normalized_analyzer_name) {
+    if (normalized_analyzer_name.empty()) {
+        return false;
+    }
+    auto parser_type = get_inverted_index_parser_type_from_string(normalized_analyzer_name);
+    return parser_type != InvertedIndexParserType::PARSER_UNKNOWN;
+}
+
+} // namespace
+
 VMatchPredicate::VMatchPredicate(const TExprNode& node) : VExpr(node) {
     _inverted_index_ctx = std::make_shared<InvertedIndexCtx>();
-    _inverted_index_ctx->custom_analyzer = node.match_predicate.custom_analyzer;
-    _inverted_index_ctx->parser_type =
-            get_inverted_index_parser_type_from_string(node.match_predicate.parser_type);
-    _inverted_index_ctx->parser_mode = node.match_predicate.parser_mode;
-    _inverted_index_ctx->char_filter_map = node.match_predicate.char_filter_map;
-    if (node.match_predicate.parser_lowercase) {
-        _inverted_index_ctx->lower_case = INVERTED_INDEX_PARSER_TRUE;
-    } else {
-        _inverted_index_ctx->lower_case = INVERTED_INDEX_PARSER_FALSE;
+
+    std::string analyzer_name;
+    if (analyzer_field_is_set(node.match_predicate)) {
+        analyzer_name = extract_analyzer_name(node.match_predicate);
     }
-    _inverted_index_ctx->stop_words = node.match_predicate.parser_stopwords;
+    std::string parser_name;
+    if (parser_field_is_set(node.match_predicate)) {
+        parser_name = extract_parser_name(node.match_predicate);
+    }
+
+    auto parser_type = get_inverted_index_parser_type_from_string(parser_name);
+    std::string normalized_analyzer = normalize_lower(analyzer_name);
+    if (parser_type == InvertedIndexParserType::PARSER_UNKNOWN) {
+        parser_type = get_inverted_index_parser_type_from_string(normalized_analyzer);
+    }
+
+    const bool analyzerLooksBuiltin = looks_like_builtin_analyzer(normalized_analyzer);
+
+    if (!analyzer_name.empty() && !analyzerLooksBuiltin) {
+        _inverted_index_ctx->custom_analyzer = analyzer_name;
+        _inverted_index_ctx->parser_type = InvertedIndexParserType::PARSER_NONE;
+        _inverted_index_ctx->analyzer_key = analyzer_name;
+    } else {
+        _inverted_index_ctx->custom_analyzer.clear();
+        if (parser_type == InvertedIndexParserType::PARSER_UNKNOWN) {
+            parser_type = InvertedIndexParserType::PARSER_NONE;
+        }
+        _inverted_index_ctx->parser_type = parser_type;
+        if (!analyzer_name.empty()) {
+            _inverted_index_ctx->analyzer_key = analyzer_name;
+        } else if (!parser_name.empty()) {
+            _inverted_index_ctx->analyzer_key = parser_name;
+        } else {
+            _inverted_index_ctx->analyzer_key = INVERTED_INDEX_DEFAULT_ANALYZER_KEY;
+        }
+    }
+
+    _inverted_index_ctx->parser_mode.clear();
+    _inverted_index_ctx->support_phrase.clear();
+    _inverted_index_ctx->char_filter_map.clear();
+    _inverted_index_ctx->lower_case.clear();
+    _inverted_index_ctx->stop_words.clear();
+
     _analyzer = inverted_index::InvertedIndexAnalyzer::create_analyzer(_inverted_index_ctx.get());
     _inverted_index_ctx->analyzer = _analyzer.get();
 }
@@ -99,6 +204,11 @@ Status VMatchPredicate::prepare(RuntimeState* state, const RowDescriptor& desc,
                 "Function {} is not implemented, input param type is {}, "
                 "and return type is {}.",
                 _fn.name.function_name, type_str, _data_type->get_name());
+    }
+
+    if (auto* match_fn = dynamic_cast<FunctionMatchBase*>(_function.get())) {
+        match_fn->set_analyzer_identity(_inverted_index_ctx->analyzer_key);
+        match_fn->ensure_analyzer_identity(_inverted_index_ctx.get());
     }
 
     VExpr::register_function_context(state, context);
@@ -153,7 +263,7 @@ Status VMatchPredicate::execute(VExprContext* context, Block* block, int* result
 
         auto* column_slot_ref = assert_cast<VSlotRef*>(get_child(0).get());
         std::string column_name = column_slot_ref->expr_name();
-        auto it = std::find(column_names.begin(), column_names.end(), column_name);
+        auto it = std::ranges::find(column_names, column_name);
         if (it == column_names.end()) {
             return Status::Error<ErrorCode::INTERNAL_ERROR>(
                     "column {} should in slow path while VMatchPredicate::execute.", column_name);

@@ -54,6 +54,7 @@ struct InvertedIndexCtx {
     std::string lower_case;
     std::string stop_words;
     lucene::analysis::Analyzer* analyzer = nullptr;
+    std::string analyzer_key;
 };
 
 using InvertedIndexCtxSPtr = std::shared_ptr<InvertedIndexCtx>;
@@ -98,6 +99,8 @@ const std::string INVERTED_INDEX_PARSER_STOPWORDS_KEY = "stopwords";
 const std::string INVERTED_INDEX_PARSER_DICT_COMPRESSION_KEY = "dict_compression";
 
 const std::string INVERTED_INDEX_CUSTOM_ANALYZER_KEY = "analyzer";
+const std::string INVERTED_INDEX_PARSER_FIELD_PATTERN_KEY = "field_pattern";
+const std::string INVERTED_INDEX_DEFAULT_ANALYZER_KEY = "__default__";
 
 std::string inverted_index_parser_type_to_string(InvertedIndexParserType parser_type);
 
@@ -140,5 +143,10 @@ std::string get_parser_dict_compression_from_properties(
 
 std::string get_custom_analyzer_string_from_properties(
         const std::map<std::string, std::string>& properties);
+
+std::string build_analyzer_identity_from_properties(
+        const std::map<std::string, std::string>& properties);
+
+std::string build_analyzer_identity_from_ctx(const InvertedIndexCtx& ctx);
 
 } // namespace doris

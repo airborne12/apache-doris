@@ -366,4 +366,11 @@ public class IndexDefinition {
                             || properties.containsKey(InvertedIndexUtil.INVERTED_INDEX_PARSER_KEY_ALIAS)
                             || properties.containsKey(InvertedIndexUtil.INVERTED_INDEX_CUSTOM_ANALYZER_KEY));
     }
+
+    public String getAnalyzerIdentity() {
+        if (indexType != IndexType.INVERTED) {
+            return "";
+        }
+        return InvertedIndexUtil.buildAnalyzerIdentity(properties);
+    }
 }

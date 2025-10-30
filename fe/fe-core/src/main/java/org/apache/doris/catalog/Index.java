@@ -388,4 +388,11 @@ public class Index implements Writable {
                 || properties.containsKey(InvertedIndexUtil.INVERTED_INDEX_PARSER_KEY_ALIAS)
                 || properties.containsKey(InvertedIndexUtil.INVERTED_INDEX_CUSTOM_ANALYZER_KEY));
     }
+
+    public String getAnalyzerIdentity() {
+        if (indexType != IndexDef.IndexType.INVERTED) {
+            return "";
+        }
+        return InvertedIndexUtil.buildAnalyzerIdentity(properties);
+    }
 }

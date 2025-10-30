@@ -82,37 +82,34 @@ std::string get_parser_string_from_properties(
 
 std::string get_parser_mode_string_from_properties(
         const std::map<std::string, std::string>& properties) {
-    if (properties.find(INVERTED_INDEX_PARSER_MODE_KEY) != properties.end()) {
-        return properties.at(INVERTED_INDEX_PARSER_MODE_KEY);
-    } else {
-        auto parser_it = properties.find(INVERTED_INDEX_PARSER_KEY);
-        if (parser_it == properties.end()) {
-            parser_it = properties.find(INVERTED_INDEX_PARSER_KEY_ALIAS);
-        }
-        if (parser_it != properties.end() && parser_it->second == INVERTED_INDEX_PARSER_IK) {
-            return INVERTED_INDEX_PARSER_SMART;
-        }
-        return INVERTED_INDEX_PARSER_COARSE_GRANULARITY;
+    if (auto it = properties.find(INVERTED_INDEX_PARSER_MODE_KEY); it != properties.end()) {
+        return it->second;
     }
+    auto parser_it = properties.find(INVERTED_INDEX_PARSER_KEY);
+    if (parser_it == properties.end()) {
+        parser_it = properties.find(INVERTED_INDEX_PARSER_KEY_ALIAS);
+    }
+    if (parser_it != properties.end() && parser_it->second == INVERTED_INDEX_PARSER_IK) {
+        return INVERTED_INDEX_PARSER_SMART;
+    }
+    return INVERTED_INDEX_PARSER_COARSE_GRANULARITY;
 }
 
 std::string get_parser_phrase_support_string_from_properties(
         const std::map<std::string, std::string>& properties) {
-    if (properties.find(INVERTED_INDEX_PARSER_PHRASE_SUPPORT_KEY) != properties.end()) {
-        return properties.at(INVERTED_INDEX_PARSER_PHRASE_SUPPORT_KEY);
-    } else {
-        return INVERTED_INDEX_PARSER_PHRASE_SUPPORT_NO;
+    if (auto it = properties.find(INVERTED_INDEX_PARSER_PHRASE_SUPPORT_KEY); it != properties.end()) {
+        return it->second;
     }
+    return INVERTED_INDEX_PARSER_PHRASE_SUPPORT_NO;
 }
 
 CharFilterMap get_parser_char_filter_map_from_properties(
         const std::map<std::string, std::string>& properties) {
-    CharFilterMap char_filter_map;
-
-    if (properties.find(INVERTED_INDEX_PARSER_CHAR_FILTER_TYPE) == properties.end()) {
-        return CharFilterMap();
+    if (!properties.contains(INVERTED_INDEX_PARSER_CHAR_FILTER_TYPE)) {
+        return {};
     }
 
+    CharFilterMap char_filter_map;
     std::string type = properties.at(INVERTED_INDEX_PARSER_CHAR_FILTER_TYPE);
     if (type == INVERTED_INDEX_CHAR_FILTER_CHAR_REPLACE) {
         // type
@@ -120,20 +117,20 @@ CharFilterMap get_parser_char_filter_map_from_properties(
                 INVERTED_INDEX_CHAR_FILTER_CHAR_REPLACE;
 
         // pattern
-        if (properties.find(INVERTED_INDEX_PARSER_CHAR_FILTER_PATTERN) == properties.end()) {
-            return CharFilterMap();
+        if (!properties.contains(INVERTED_INDEX_PARSER_CHAR_FILTER_PATTERN)) {
+            return {};
         }
         std::string pattern = properties.at(INVERTED_INDEX_PARSER_CHAR_FILTER_PATTERN);
         char_filter_map[INVERTED_INDEX_PARSER_CHAR_FILTER_PATTERN] = pattern;
 
         // placement
         std::string replacement = " ";
-        if (properties.find(INVERTED_INDEX_PARSER_CHAR_FILTER_REPLACEMENT) != properties.end()) {
+        if (properties.contains(INVERTED_INDEX_PARSER_CHAR_FILTER_REPLACEMENT)) {
             replacement = properties.at(INVERTED_INDEX_PARSER_CHAR_FILTER_REPLACEMENT);
         }
         char_filter_map[INVERTED_INDEX_PARSER_CHAR_FILTER_REPLACEMENT] = replacement;
     } else {
-        return CharFilterMap();
+        return {};
     }
 
     return char_filter_map;
@@ -141,39 +138,79 @@ CharFilterMap get_parser_char_filter_map_from_properties(
 
 std::string get_parser_ignore_above_value_from_properties(
         const std::map<std::string, std::string>& properties) {
-    if (properties.find(INVERTED_INDEX_PARSER_IGNORE_ABOVE_KEY) != properties.end()) {
-        return properties.at(INVERTED_INDEX_PARSER_IGNORE_ABOVE_KEY);
-    } else {
-        return INVERTED_INDEX_PARSER_IGNORE_ABOVE_VALUE;
+    if (auto it = properties.find(INVERTED_INDEX_PARSER_IGNORE_ABOVE_KEY); it != properties.end()) {
+        return it->second;
     }
+    return INVERTED_INDEX_PARSER_IGNORE_ABOVE_VALUE;
 }
 
 std::string get_parser_stopwords_from_properties(
         const std::map<std::string, std::string>& properties) {
     DBUG_EXECUTE_IF("inverted_index_parser.get_parser_stopwords_from_properties", { return ""; })
-    if (properties.find(INVERTED_INDEX_PARSER_STOPWORDS_KEY) != properties.end()) {
-        return properties.at(INVERTED_INDEX_PARSER_STOPWORDS_KEY);
-    } else {
-        return "";
+    if (auto it = properties.find(INVERTED_INDEX_PARSER_STOPWORDS_KEY); it != properties.end()) {
+        return it->second;
     }
+    return "";
 }
 
 std::string get_parser_dict_compression_from_properties(
         const std::map<std::string, std::string>& properties) {
-    if (properties.find(INVERTED_INDEX_PARSER_DICT_COMPRESSION_KEY) != properties.end()) {
-        return properties.at(INVERTED_INDEX_PARSER_DICT_COMPRESSION_KEY);
-    } else {
-        return "";
+    if (auto it = properties.find(INVERTED_INDEX_PARSER_DICT_COMPRESSION_KEY);
+        it != properties.end()) {
+        return it->second;
     }
+    return "";
 }
 
 std::string get_custom_analyzer_string_from_properties(
         const std::map<std::string, std::string>& properties) {
-    if (properties.find(INVERTED_INDEX_CUSTOM_ANALYZER_KEY) != properties.end()) {
-        return properties.at(INVERTED_INDEX_CUSTOM_ANALYZER_KEY);
-    } else {
-        return "";
+    if (auto it = properties.find(INVERTED_INDEX_CUSTOM_ANALYZER_KEY); it != properties.end()) {
+        return it->second;
     }
+    return "";
+}
+
+std::string build_analyzer_identity_from_properties(
+        const std::map<std::string, std::string>& properties) {
+    if (properties.empty()) {
+        return INVERTED_INDEX_DEFAULT_ANALYZER_KEY;
+    }
+
+    auto custom_it = properties.find(INVERTED_INDEX_CUSTOM_ANALYZER_KEY);
+    if (custom_it != properties.end() && !custom_it->second.empty()) {
+        return custom_it->second;
+    }
+
+    std::string parser;
+    auto parser_it = properties.find(INVERTED_INDEX_PARSER_KEY);
+    if (parser_it != properties.end()) {
+        parser = parser_it->second;
+    } else {
+        parser_it = properties.find(INVERTED_INDEX_PARSER_KEY_ALIAS);
+        if (parser_it != properties.end()) {
+            parser = parser_it->second;
+        }
+    }
+    if (parser.empty() || parser == INVERTED_INDEX_PARSER_NONE) {
+        return INVERTED_INDEX_DEFAULT_ANALYZER_KEY;
+    }
+
+    return parser;
+}
+
+std::string build_analyzer_identity_from_ctx(const InvertedIndexCtx& ctx) {
+    if (!ctx.analyzer_key.empty() && ctx.analyzer_key != INVERTED_INDEX_DEFAULT_ANALYZER_KEY) {
+        return ctx.analyzer_key;
+    }
+    if (!ctx.custom_analyzer.empty()) {
+        return ctx.custom_analyzer;
+    }
+    std::string parser = inverted_index_parser_type_to_string(ctx.parser_type);
+    if (parser.empty() || parser == INVERTED_INDEX_PARSER_NONE ||
+        parser == INVERTED_INDEX_PARSER_UNKNOWN) {
+        return INVERTED_INDEX_DEFAULT_ANALYZER_KEY;
+    }
+    return parser;
 }
 
 } // namespace doris

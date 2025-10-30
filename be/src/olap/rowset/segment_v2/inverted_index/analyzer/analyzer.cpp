@@ -57,16 +57,8 @@ ReaderPtr InvertedIndexAnalyzer::create_reader(CharFilterMap& char_filter_map) {
 
 std::shared_ptr<lucene::analysis::Analyzer> InvertedIndexAnalyzer::create_analyzer(
         const InvertedIndexCtx* inverted_index_ctx) {
-    std::shared_ptr<lucene::analysis::Analyzer> analyzer;
-    if (!inverted_index_ctx->custom_analyzer.empty()) {
-        auto index_policy_mgr = doris::ExecEnv::GetInstance()->index_policy_mgr();
-        if (!index_policy_mgr) {
-            throw Exception(ErrorCode::INVERTED_INDEX_ANALYZER_ERROR,
-                            "index policy mgr is not initialized");
-        }
-        analyzer = index_policy_mgr->get_policy_by_name(inverted_index_ctx->custom_analyzer);
-    } else {
-        auto analyser_type = inverted_index_ctx->parser_type;
+    auto build_builtin = [&](InvertedIndexParserType analyser_type) {
+        std::shared_ptr<lucene::analysis::Analyzer> analyzer;
         if (analyser_type == InvertedIndexParserType::PARSER_STANDARD ||
             analyser_type == InvertedIndexParserType::PARSER_UNICODE) {
             analyzer = std::make_shared<lucene::analysis::standard95::StandardAnalyzer>();
@@ -99,23 +91,41 @@ std::shared_ptr<lucene::analysis::Analyzer> InvertedIndexAnalyzer::create_analyz
             }
             analyzer = std::move(ik_analyzer);
         } else {
-            // default
             analyzer = std::make_shared<lucene::analysis::SimpleAnalyzer<char>>();
         }
-        // set lowercase
         auto lowercase = inverted_index_ctx->lower_case;
         if (lowercase == INVERTED_INDEX_PARSER_TRUE) {
             analyzer->set_lowercase(true);
         } else if (lowercase == INVERTED_INDEX_PARSER_FALSE) {
             analyzer->set_lowercase(false);
         }
-        // set stop words
         auto stop_words = inverted_index_ctx->stop_words;
         if (stop_words == "none") {
             analyzer->set_stopwords(nullptr);
         } else {
             analyzer->set_stopwords(&lucene::analysis::standard95::stop_words);
         }
+        return analyzer;
+    };
+
+    std::shared_ptr<lucene::analysis::Analyzer> analyzer;
+    if (!inverted_index_ctx->custom_analyzer.empty()) {
+        bool resolved = false;
+        if (auto index_policy_mgr = doris::ExecEnv::GetInstance()->index_policy_mgr()) {
+            try {
+                analyzer = index_policy_mgr->get_policy_by_name(inverted_index_ctx->custom_analyzer);
+                resolved = analyzer != nullptr;
+            } catch (const Exception&) {
+                resolved = false;
+            }
+        }
+        if (!resolved) {
+            auto fallback_type = get_inverted_index_parser_type_from_string(
+                    inverted_index_ctx->custom_analyzer);
+            analyzer = build_builtin(fallback_type);
+        }
+    } else {
+        analyzer = build_builtin(inverted_index_ctx->parser_type);
     }
     return analyzer;
 }

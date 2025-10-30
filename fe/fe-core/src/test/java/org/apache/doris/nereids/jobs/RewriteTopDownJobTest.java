@@ -21,8 +21,12 @@ import org.apache.doris.catalog.TableIf;
 import org.apache.doris.nereids.analyzer.UnboundRelation;
 import org.apache.doris.nereids.memo.Group;
 import org.apache.doris.nereids.memo.GroupExpression;
+import org.apache.doris.nereids.pattern.Pattern;
+import org.apache.doris.nereids.pattern.PatternDescriptor;
+import org.apache.doris.nereids.pattern.TypePattern;
 import org.apache.doris.nereids.properties.LogicalProperties;
 import org.apache.doris.nereids.rules.Rule;
+import org.apache.doris.nereids.rules.RulePromise;
 import org.apache.doris.nereids.rules.RuleType;
 import org.apache.doris.nereids.rules.rewrite.RewriteRuleFactory;
 import org.apache.doris.nereids.trees.expressions.Slot;
@@ -54,18 +58,28 @@ public class RewriteTopDownJobTest {
         public List<Rule> buildRules() {
             return ImmutableList.of(
                     RuleType.BINDING_RELATION.build(
-                            unboundRelation().then(unboundRelation ->
+                            unboundRelationPattern().then(unboundRelation ->
                                     new LogicalBoundRelation(
                                             PlanConstructor.newOlapTable(0L, "test", 0),
                                             Lists.newArrayList("test"))
                             )
                     ),
                     RuleType.BINDING_PROJECT_SLOT.build(
-                            logicalProject()
+                            logicalProjectPattern()
                                     .when(Plan::canBind)
                                     .then(LogicalPlan::recomputeLogicalProperties)
                     )
             );
+        }
+    
+        private PatternDescriptor<UnboundRelation> unboundRelationPattern() {
+            return new PatternDescriptor<>(new TypePattern<>(UnboundRelation.class), RulePromise.REWRITE);
+        }
+
+        private PatternDescriptor<LogicalProject<Plan>> logicalProjectPattern() {
+            return new PatternDescriptor<>(
+                    new TypePattern<>(LogicalProject.class, Pattern.ANY),
+                    RulePromise.REWRITE);
         }
     }
 
