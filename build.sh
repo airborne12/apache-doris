@@ -49,6 +49,7 @@ Usage: $0 <options>
   Optional options:
      [no option]                build all components
      --fe                       build Frontend. Default ON.
+     --fe-incremental           build Frontend with Gradle incremental compilation (faster for small changes).
      --be                       build Backend. Default ON.
      --meta-tool                build Backend meta tool. Default OFF.
      --file-cache-microbench    build Backend file cache microbench tool. Default OFF.
@@ -69,6 +70,7 @@ Usage: $0 <options>
     DISABLE_BE_JAVA_EXTENSIONS  If set DISABLE_BE_JAVA_EXTENSIONS=ON, we will do not build binary with java-udf,hadoop-hudi-scanner,jdbc-scanner and so on Default is OFF.
     DISABLE_JAVA_CHECK_STYLE    If set DISABLE_JAVA_CHECK_STYLE=ON, it will skip style check of java code in FE.
     DISABLE_BUILD_AZURE         If set DISABLE_BUILD_AZURE=ON, it will not build azure into BE.
+    FE_INCREMENTAL_AUTO         If set FE_INCREMENTAL_AUTO=1, automatically use Gradle incremental build when conditions are suitable (no grammar file changes, previous build exists). Default is OFF.
   Eg.
     $0                                      build all
     $0 --be                                 build Backend
@@ -78,6 +80,7 @@ Usage: $0 <options>
     $0 --index-tool                         build Backend inverted index tool
     $0 --fe --clean                         clean and build Frontend and Spark Dpp application
     $0 --fe --be --clean                    clean and build Frontend and Backend
+    $0 --fe-incremental                     build Frontend with Gradle incremental compilation
     $0 --spark-dpp                          build Spark DPP application alone
     $0 --broker                             build Broker
     $0 --be --fe                            build Backend, Frontend, and Java UDF library
@@ -120,6 +123,100 @@ clean_fe() {
     popd
 }
 
+# Build FE with Gradle (incremental compilation)
+build_fe_incremental() {
+    local fe_dir="${DORIS_HOME}/fe"
+    local gradle_wrapper="${fe_dir}/gradlew"
+
+    echo "=== Building FE with Gradle Incremental Compilation ==="
+
+    # Check if Gradle wrapper exists
+    if [[ ! -f "${gradle_wrapper}" ]]; then
+        echo "Error: Gradle wrapper not found at ${gradle_wrapper}"
+        echo "Please ensure Gradle migration is complete. Falling back to Maven..."
+        return 1
+    fi
+
+    # Check if generated sources exist, if not, generate them with Maven first
+    local need_generate_sources=0
+    if [[ ! -d "${fe_dir}/fe-core/target/generated-sources/antlr4" ]] ||
+       [[ ! -d "${fe_dir}/fe-core/target/generated-sources/cup" ]] ||
+       [[ ! -d "${fe_dir}/fe-core/target/generated-sources/jflex" ]] ||
+       [[ ! -d "${fe_dir}/fe-core/target/generated-sources/org" ]]; then
+        need_generate_sources=1
+    fi
+
+    if [[ ${need_generate_sources} -eq 1 ]]; then
+        echo "Generated sources not found. Running Maven generate-sources first..."
+        pushd "${fe_dir}"
+        "${MVN_CMD}" generate-sources -pl fe-core -am -DskipTests -Dcheckstyle.skip=true -q
+        popd
+    fi
+
+    # Run Gradle compilation
+    pushd "${fe_dir}"
+    echo "Running Gradle incremental compilation..."
+    local gradle_start_time=$(date +%s)
+
+    if ! "${gradle_wrapper}" :fe-core:compileJava :fe-common:compileJava; then
+        echo "Gradle compilation failed. Falling back to Maven..."
+        popd
+        return 1
+    fi
+
+    local gradle_end_time=$(date +%s)
+    local gradle_elapsed=$((gradle_end_time - gradle_start_time))
+    echo "Gradle compilation completed in ${gradle_elapsed} seconds"
+
+    # Build JAR with Maven (Gradle JAR doesn't include all dependencies properly yet)
+    echo "Building JAR with Maven..."
+    if [[ "${DISABLE_JAVA_CHECK_STYLE}" = "ON" ]]; then
+        "${MVN_CMD}" package -pl fe-core -am -Dskip.doc=true -DskipTests -Dcheckstyle.skip=true -Dmaven.compile.skip=true ${MVN_OPT:+${MVN_OPT}} -T 1C
+    else
+        "${MVN_CMD}" package -pl fe-core -am -Dskip.doc=true -DskipTests -Dmaven.compile.skip=true ${MVN_OPT:+${MVN_OPT}} -T 1C
+    fi
+
+    popd
+    echo "=== FE Incremental Build Complete ==="
+    return 0
+}
+
+# Detect if incremental build is appropriate
+should_use_incremental_build() {
+    local fe_dir="${DORIS_HOME}/fe"
+
+    # If clean is requested, don't use incremental
+    if [[ "${CLEAN}" -eq 1 ]]; then
+        return 1
+    fi
+
+    # If no previous build exists, don't use incremental
+    if [[ ! -d "${fe_dir}/fe-core/target/classes" ]]; then
+        return 1
+    fi
+
+    # If generated sources don't exist, prefer Maven full build
+    if [[ ! -d "${fe_dir}/fe-core/target/generated-sources/antlr4" ]]; then
+        return 1
+    fi
+
+    # Check if only Java files changed (not .g4, .flex, .cup, .proto, .thrift)
+    local changed_files
+    changed_files=$(cd "${fe_dir}" && git diff --name-only HEAD 2>/dev/null || echo "")
+
+    if [[ -z "${changed_files}" ]]; then
+        # No changes in git, check for uncommitted changes
+        changed_files=$(cd "${fe_dir}" && git status --porcelain 2>/dev/null | awk '{print $2}' || echo "")
+    fi
+
+    # If any non-Java source files changed, prefer Maven
+    if echo "${changed_files}" | grep -qE '\.(g4|flex|cup|proto|thrift)$'; then
+        return 1
+    fi
+
+    return 0
+}
+
 # Copy the common files like licenses, notice.txt to output folder
 function copy_common_files() {
     cp -r -p "${DORIS_HOME}/NOTICE.txt" "$1/"
@@ -131,6 +228,7 @@ if ! OPTS="$(getopt \
     -n "$0" \
     -o '' \
     -l 'fe' \
+    -l 'fe-incremental' \
     -l 'be' \
     -l 'cloud' \
     -l 'broker' \
@@ -154,6 +252,7 @@ eval set -- "${OPTS}"
 
 PARALLEL="$(($(nproc) / 4 + 1))"
 BUILD_FE=0
+BUILD_FE_INCREMENTAL=0
 BUILD_BE=0
 BUILD_CLOUD=0
 BUILD_BROKER=0
@@ -187,6 +286,13 @@ else
         case "$1" in
         --fe)
             BUILD_FE=1
+            BUILD_HIVE_UDF=1
+            BUILD_BE_JAVA_EXTENSIONS=1
+            shift
+            ;;
+        --fe-incremental)
+            BUILD_FE=1
+            BUILD_FE_INCREMENTAL=1
             BUILD_HIVE_UDF=1
             BUILD_BE_JAVA_EXTENSIONS=1
             shift
@@ -483,6 +589,7 @@ fi
 
 echo "Get params:
     BUILD_FE                            -- ${BUILD_FE}
+    BUILD_FE_INCREMENTAL                -- ${BUILD_FE_INCREMENTAL}
     BUILD_BE                            -- ${BUILD_BE}
     BUILD_CLOUD                         -- ${BUILD_CLOUD}
     BUILD_BROKER                        -- ${BUILD_BROKER}
@@ -726,18 +833,40 @@ if [[ "${FE_MODULES}" != '' ]]; then
     if [[ "${CLEAN}" -eq 1 ]]; then
         clean_fe
     fi
-    if [[ "${DISABLE_JAVA_CHECK_STYLE}" = "ON" ]]; then
-        # Allowed user customer set env param USER_SETTINGS_MVN_REPO means settings.xml file path
-        if [[ -n ${USER_SETTINGS_MVN_REPO} && -f ${USER_SETTINGS_MVN_REPO} ]]; then
-            "${MVN_CMD}" package -pl ${FE_MODULES:+${FE_MODULES}} -Dskip.doc=true -DskipTests -Dcheckstyle.skip=true ${MVN_OPT:+${MVN_OPT}} -gs "${USER_SETTINGS_MVN_REPO}" -T 1C
-        else
-            "${MVN_CMD}" package -pl ${FE_MODULES:+${FE_MODULES}} -Dskip.doc=true -DskipTests -Dcheckstyle.skip=true ${MVN_OPT:+${MVN_OPT}} -T 1C
+
+    # Determine whether to use incremental build
+    use_incremental=0
+    if [[ "${BUILD_FE_INCREMENTAL}" -eq 1 ]]; then
+        use_incremental=1
+        echo "Incremental build requested via --fe-incremental"
+    elif [[ "${FE_INCREMENTAL_AUTO:-0}" -eq 1 ]] && should_use_incremental_build; then
+        use_incremental=1
+        echo "Auto-detected suitable conditions for incremental build"
+    fi
+
+    if [[ ${use_incremental} -eq 1 ]]; then
+        # Try Gradle incremental build, fall back to Maven if it fails
+        if ! build_fe_incremental; then
+            echo "Falling back to Maven build..."
+            use_incremental=0
         fi
-    else
-        if [[ -n ${USER_SETTINGS_MVN_REPO} && -f ${USER_SETTINGS_MVN_REPO} ]]; then
-            "${MVN_CMD}" package -pl ${FE_MODULES:+${FE_MODULES}} -Dskip.doc=true -DskipTests ${MVN_OPT:+${MVN_OPT}} -gs "${USER_SETTINGS_MVN_REPO}" -T 1C
+    fi
+
+    # Use Maven if incremental build was not used or failed
+    if [[ ${use_incremental} -eq 0 ]]; then
+        if [[ "${DISABLE_JAVA_CHECK_STYLE}" = "ON" ]]; then
+            # Allowed user customer set env param USER_SETTINGS_MVN_REPO means settings.xml file path
+            if [[ -n ${USER_SETTINGS_MVN_REPO} && -f ${USER_SETTINGS_MVN_REPO} ]]; then
+                "${MVN_CMD}" package -pl ${FE_MODULES:+${FE_MODULES}} -Dskip.doc=true -DskipTests -Dcheckstyle.skip=true ${MVN_OPT:+${MVN_OPT}} -gs "${USER_SETTINGS_MVN_REPO}" -T 1C
+            else
+                "${MVN_CMD}" package -pl ${FE_MODULES:+${FE_MODULES}} -Dskip.doc=true -DskipTests -Dcheckstyle.skip=true ${MVN_OPT:+${MVN_OPT}} -T 1C
+            fi
         else
-            "${MVN_CMD}" package -pl ${FE_MODULES:+${FE_MODULES}} -Dskip.doc=true -DskipTests ${MVN_OPT:+${MVN_OPT}} -T 1C
+            if [[ -n ${USER_SETTINGS_MVN_REPO} && -f ${USER_SETTINGS_MVN_REPO} ]]; then
+                "${MVN_CMD}" package -pl ${FE_MODULES:+${FE_MODULES}} -Dskip.doc=true -DskipTests ${MVN_OPT:+${MVN_OPT}} -gs "${USER_SETTINGS_MVN_REPO}" -T 1C
+            else
+                "${MVN_CMD}" package -pl ${FE_MODULES:+${FE_MODULES}} -Dskip.doc=true -DskipTests ${MVN_OPT:+${MVN_OPT}} -T 1C
+            fi
         fi
     fi
     cd "${DORIS_HOME}"
