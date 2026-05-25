@@ -1252,11 +1252,16 @@ Status SegmentWriter::_generate_short_key_index(std::vector<IOlapColumnDataAcces
     return Status::OK();
 }
 
-inline bool SegmentWriter::_is_mow() {
+// Not `inline`: in RELEASE optimization the compiler elides the
+// out-of-line symbol when all in-TU callers inline it, but the
+// TestSegmentWriter subclass in be/test calls these from outside
+// this TU and needs a linkable symbol. Drop the explicit `inline`
+// so the compiler emits both versions when needed.
+bool SegmentWriter::_is_mow() {
     return _tablet_schema->keys_type() == UNIQUE_KEYS && _opts.enable_unique_key_merge_on_write;
 }
 
-inline bool SegmentWriter::_is_mow_with_cluster_key() {
+bool SegmentWriter::_is_mow_with_cluster_key() {
     return _is_mow() && !_tablet_schema->cluster_key_uids().empty();
 }
 
