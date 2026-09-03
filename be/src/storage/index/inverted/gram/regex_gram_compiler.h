@@ -47,8 +47,17 @@ public:
     // 只有内部断言失败才返回非 OK。
     Status compile_regexp(std::string_view pattern, GramQuery* out);
 
-    // 编译 LIKE：在 % 与 _ 处切断为字面量段，`\` 转义其后的一个字符，每段的 gram
-    // 之 AND 再彼此 AND；全通配（无字面量段）时为 ALL。
+    // 编译 LIKE：在 % 与 _ 处切断为字面量段，每段的 gram 之 AND 再彼此 AND；
+    // 全通配（无字面量段）时为 ALL。
+    //
+    // 转义字符固定假定为 `\`；且只把 `\%`、`\_`、`\\` 当作转义（对应 Doris LIKE
+    // 的实际语义），转义后的字符作为字面量并入当前段。其余 `\x`（x 不是这三者
+    // 之一）无法确定引擎是否保留反斜杠本身，因此在两种可能语义下都保守地在
+    // 反斜杠处切段、不产生跨越该处的 gram，x 仍作为下一段的起点参与后续字面量
+    // （只损失一点裁剪力，绝不会漏杀）；模式尾部单独一个 `\` 同样切段后忽略。
+    // 不支持 `ESCAPE` 子句：调用方若用到了非 `\` 的自定义转义字符，不得对该
+    // LIKE 使用本索引（本函数推导出的边界会与引擎实际语义不一致，可能漏杀）。
+    //
     // ILIKE 语义由调用方通过 scheme.lower_case 决定（索引与查询同时折叠）。
     Status compile_like(std::string_view like_pattern, GramQuery* out);
 

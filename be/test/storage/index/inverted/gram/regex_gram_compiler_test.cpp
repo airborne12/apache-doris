@@ -19,6 +19,10 @@
 
 #include <gtest/gtest.h>
 
+#include <algorithm>
+#include <string>
+#include <vector>
+
 namespace doris::segment_v2::gram {
 
 // 稠密 golden：与原型 `ngram_model_check --n 3 --explain <re>` 的输出逐字相同
@@ -104,6 +108,46 @@ TEST(RegexGramCompilerTest, Like) {
     ASSERT_TRUE(c.compile_like("abc\\%def", &q).ok());     // 转义的 % 是字面量
     EXPECT_EQ(q.to_debug_string(), "(\"%de\" & \"abc\" & \"bc%\" & \"c%d\" & \"def\")");
     ASSERT_TRUE(c.compile_like("%", &q).ok());
+    EXPECT_TRUE(q.is_all());
+}
+
+// Ruling R10：LIKE 的转义字符固定假定为 `\`，只有 `\%`、`\_`、`\\` 是真正的
+// 转义；`\x`（x 不是这三者之一）时不确定引擎是保留反斜杠本身（行内 "\x" 两
+// 字节）还是丢弃反斜杠（行内只有 "x"，旧实现的错误假设）。两种语义下都能确定
+// 连续出现的只有「x 与它之后的字符」，因此必须在反斜杠处切段：段前的字面量
+// （如 "abc"）不能与 x 合并，x 仍可与其后的字符合成新段（如 "def"）。
+TEST(RegexGramCompilerTest, LikeEscapeConservative) {
+    GramScheme s;
+    s.mode = GramMode::DENSE;
+    RegexGramCompiler c(s);
+    GramQuery q;
+
+    // `\d` 不是已知转义：在 "abc" 与 "d" 之间切段；"d" 与其后的 "ef" 仍连续，
+    // 合成新段 "def"。两段各恰好凑成一个 3-gram。
+    ASSERT_TRUE(c.compile_like("abc\\def", &q).ok());
+    EXPECT_EQ(q.to_debug_string(), "(\"abc\" & \"def\")");
+
+    // 既有 golden，必须保持不变：`\%` 是已知转义，"%" 并入前一段。
+    ASSERT_TRUE(c.compile_like("abc\\%def", &q).ok());
+    EXPECT_EQ(q.to_debug_string(), "(\"%de\" & \"abc\" & \"bc%\" & \"c%d\" & \"def\")");
+
+    // `\\` 转义出一个字面反斜杠，与前后字符组成连续字面量段
+    // "ab\cd"（5 字节：a b \ c d）。产出的 gram 本身含 0x5C，字典序排在字母
+    // 之前；直接比较 to_debug_string 需要手工转义两层，改为比较排序后的
+    // q.grams，避免转义出错。
+    ASSERT_TRUE(c.compile_like("ab\\\\cd", &q).ok());
+    ASSERT_EQ(q.op, GramQuery::Op::AND);
+    EXPECT_TRUE(q.subs.empty());
+    std::vector<std::string> grams = q.grams;
+    std::sort(grams.begin(), grams.end());
+    EXPECT_EQ(grams, std::vector<std::string>({"\\cd", "ab\\", "b\\c"}));
+
+    // 模式尾部单独一个反斜杠：没有可转义的对象，切段后忽略。
+    ASSERT_TRUE(c.compile_like("abc\\", &q).ok());
+    EXPECT_EQ(q.to_debug_string(), "(\"abc\")");
+
+    // 转义的 % 只产出 1 字节字面量段，不够一个 gram（n=3）→ ALL。
+    ASSERT_TRUE(c.compile_like("%\\%", &q).ok());
     EXPECT_TRUE(q.is_all());
 }
 

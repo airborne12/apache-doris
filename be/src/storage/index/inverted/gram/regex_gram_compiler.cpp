@@ -564,8 +564,27 @@ Status RegexGramCompiler::compile_like(std::string_view like_pattern, GramQuery*
     };
     for (size_t i = 0; i < like_pattern.size(); i++) {
         const char c = like_pattern[i];
-        if (c == '\\' && i + 1 < like_pattern.size()) {
-            seg.push_back(like_pattern[++i]); // 转义：下一个字符是字面量
+        if (c == '\\') {
+            if (i + 1 < like_pattern.size()) {
+                const char next = like_pattern[i + 1];
+                if (next == '%' || next == '_' || next == '\\') {
+                    // Doris LIKE 真正的转义只有这三种：反斜杠被吃掉，next 作为字面量
+                    // 并入当前段（next 与它前后的字符在匹配行里必然连续出现）。
+                    seg.push_back(next);
+                    i++;
+                    continue;
+                }
+                // `\x`（x 不是 % _ \ 之一）：不确定引擎是保留反斜杠本身（行内是
+                // "\x" 两字节）还是丢弃反斜杠（行内只有 "x"，旧实现的假设）。
+                // 两种语义下都能确定的只有「x 与它之后的字符连续」，x 与它之前
+                // 的字符之间是否隔着一个反斜杠是未知的，因此在反斜杠处切段——
+                // 反斜杠本身不产生任何 gram，x 留给下一轮当作新段的起点，不与
+                // 已切出的旧段合并（只损失一点裁剪力，绝不会漏杀）。
+                flush();
+                continue;
+            }
+            // 模式尾部单独一个反斜杠，没有可转义的对象：切段后忽略。
+            flush();
             continue;
         }
         if (c == '%' || c == '_') {
