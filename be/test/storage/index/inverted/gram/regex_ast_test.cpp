@@ -33,7 +33,7 @@ static std::string dump(const RegexNode* n) {
             return "[big]";
         }
         std::string s = "[";
-        for (auto& c : n->cls) {
+        for (const auto& c : n->cls) {
             s += c;
         }
         return s + "]";
@@ -42,14 +42,14 @@ static std::string dump(const RegexNode* n) {
         return ".";
     case T::CAT: {
         std::string s = "cat(";
-        for (auto& k : n->kids) {
+        for (const auto& k : n->kids) {
             s += dump(k.get()) + ",";
         }
         return s + ")";
     }
     case T::ALT: {
         std::string s = "alt(";
-        for (auto& k : n->kids) {
+        for (const auto& k : n->kids) {
             s += dump(k.get()) + ",";
         }
         return s + ")";

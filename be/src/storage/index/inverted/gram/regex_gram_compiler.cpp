@@ -250,12 +250,8 @@ private:
     // 集合里每个串是否都够长（≥ n）。只有全部够长时才值得把整个集合折进 match：
     // 只要有一个串切不出 gram，OR 起来就是 ALL，折了也没有任何约束力。
     bool _all_long(const std::set<std::string>& s) const {
-        for (const auto& x : s) {
-            if (x.size() < _scheme.min_len) {
-                return false;
-            }
-        }
-        return true;
+        return std::ranges::all_of(s,
+                                   [this](const auto& x) { return x.size() >= _scheme.min_len; });
     }
 
     // scheme.lower_case 时索引侧已把 ASCII 字母折成小写，字面量必须同样折叠。
@@ -432,6 +428,32 @@ private:
         return _simplify(std::move(x));
     }
 
+    // 区间量词 REPEAT `{m}`/`{m,}`/`{m,n}`：精确展开 min(m, kMaxRepeatUnroll) 次
+    // （能捕获跨拷贝的边界 gram），次数还可能更多（rmax 未达上界或超过展开次数）
+    // 时再按 plus 处理只保留首尾。从 _analyze 抽出以降低其复杂度/长度，语义与
+    // 原 switch case 完全一致。
+    Info _repeat_info(const RegexNode* n, int depth) {
+        // rmin < 0 只可能来自解析阶段的计数溢出，此时区间不可信，保守处理。
+        if (n->kids.empty() || n->rmin < 0) {
+            return info_any_match();
+        }
+        if (n->rmin == 0 && n->rmax == 0) {
+            return info_empty();
+        }
+        if (n->rmin == 0) {
+            return info_any_match();
+        }
+        Info acc = info_empty();
+        const int reps = std::min(n->rmin, kMaxRepeatUnroll);
+        for (int k = 0; k < reps; k++) {
+            acc = _concat_info(std::move(acc), _analyze(n->kids[0].get(), depth + 1));
+        }
+        if (n->rmax == n->rmin && n->rmin <= kMaxRepeatUnroll) {
+            return acc;
+        }
+        return _plus_info(std::move(acc));
+    }
+
     Info _analyze(const RegexNode* n, int depth) {
         if (n == nullptr || depth > kMaxAnalyzeDepth) {
             return info_any_match();
@@ -499,29 +521,8 @@ private:
                 return info_any_match();
             }
             return _alt_info(_analyze(n->kids[0].get(), depth + 1), info_empty());
-        case RegexNode::Type::REPEAT: {
-            // rmin < 0 只可能来自解析阶段的计数溢出，此时区间不可信，保守处理。
-            if (n->kids.empty() || n->rmin < 0) {
-                return info_any_match();
-            }
-            if (n->rmin == 0 && n->rmax == 0) {
-                return info_empty();
-            }
-            if (n->rmin == 0) {
-                return info_any_match();
-            }
-            // x{m,..}：精确展开 min(m, 4) 次（能捕获跨拷贝的边界 gram），次数还可能
-            // 更多时再按 plus 处理。
-            Info acc = info_empty();
-            const int reps = std::min(n->rmin, kMaxRepeatUnroll);
-            for (int k = 0; k < reps; k++) {
-                acc = _concat_info(std::move(acc), _analyze(n->kids[0].get(), depth + 1));
-            }
-            if (n->rmax == n->rmin && n->rmin <= kMaxRepeatUnroll) {
-                return acc;
-            }
-            return _plus_info(std::move(acc));
-        }
+        case RegexNode::Type::REPEAT:
+            return _repeat_info(n, depth);
         }
         return info_any_match();
     }

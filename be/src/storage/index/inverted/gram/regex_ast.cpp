@@ -345,6 +345,42 @@ struct Parser {
         }
     }
 
+    // [...] 内单个码点 lo 之后的 `-hi` 区间处理：是区间就展开 [lo,hi]（超过 4 项
+    // 连同已有 items 一起退化为大类）；不是区间（下一字符不是 '-'，或 '-' 紧邻
+    // ']'，即字面量 '-'）就把 lo 本身作为一个单独 item。从 parse_class 抽出以
+    // 降低其复杂度/长度，语义与原内联代码完全一致。
+    void parse_class_range_or_single(uint32_t lo, std::vector<uint32_t>* items, bool* big) {
+        if (!(peek() == '-' && i + 1 < p.size() && p[i + 1] != ']')) {
+            items->push_back(lo);
+            return;
+        }
+        i++;
+        uint32_t hi;
+        if (peek() == '\\') {
+            i++;
+            std::vector<uint32_t> tmp;
+            bool b2 = false;
+            class_escape(&tmp, &b2);
+            hi = tmp.empty() ? lo : tmp.back();
+            if (b2) {
+                *big = true;
+            }
+        } else {
+            std::string u;
+            hi = next_cp(&u);
+        }
+        if (hi < lo) {
+            std::swap(lo, hi);
+        }
+        if (hi - lo + 1 + items->size() > 4) {
+            *big = true;
+        } else {
+            for (uint32_t x = lo; x <= hi; x++) {
+                items->push_back(x);
+            }
+        }
+    }
+
     NP parse_class() {
         // 已消费 '['
         NP n = mk(RegexNode::Type::CLASS);
@@ -383,35 +419,7 @@ struct Parser {
                 std::string u;
                 lo = next_cp(&u);
             }
-            if (peek() == '-' && i + 1 < p.size() && p[i + 1] != ']') {
-                i++;
-                uint32_t hi;
-                if (peek() == '\\') {
-                    i++;
-                    std::vector<uint32_t> tmp;
-                    bool b2 = false;
-                    class_escape(&tmp, &b2);
-                    hi = tmp.empty() ? lo : tmp.back();
-                    if (b2) {
-                        big = true;
-                    }
-                } else {
-                    std::string u;
-                    hi = next_cp(&u);
-                }
-                if (hi < lo) {
-                    std::swap(lo, hi);
-                }
-                if (hi - lo + 1 + items.size() > 4) {
-                    big = true;
-                } else {
-                    for (uint32_t x = lo; x <= hi; x++) {
-                        items.push_back(x);
-                    }
-                }
-            } else {
-                items.push_back(lo);
-            }
+            parse_class_range_or_single(lo, &items, &big);
         }
         if (peek() != ']') {
             ok = false;
@@ -449,7 +457,7 @@ struct Parser {
         return n;
     }
 
-    NP make_lit(uint32_t cp) {
+    NP make_lit(uint32_t cp) const {
         std::string u;
         encode_cp(cp, &u);
         if (icase && cp < 128 && std::isalpha(static_cast<unsigned char>(cp))) {
@@ -468,68 +476,154 @@ struct Parser {
         return n;
     }
 
+    // parse_atom 里 `\` 转义分支的具体解码：调用时 '\\' 已被消费、且已确认未到
+    // 达 eof（trailing-backslash 由调用方在切换前处理），据 peek() 到的转义选择
+    // 字符分派。从 parse_atom 抽出以降低其复杂度/长度，语义与原内联 switch
+    // 完全一致。
+    NP parse_backslash_escape() {
+        char e = peek();
+        switch (e) {
+        case 'd':
+        case 'w':
+        case 's':
+        case 'D':
+        case 'W':
+        case 'S': {
+            i++;
+            NP n = mk(RegexNode::Type::CLASS);
+            n->big_class = true;
+            return n;
+        }
+        case 'b':
+        case 'B':
+        case 'A':
+        case 'z':
+            i++;
+            return mk(RegexNode::Type::EMPTY);
+        case 'p':
+        case 'P': {
+            i++;
+            if (peek() == '{') {
+                while (!eof() && peek() != '}') {
+                    i++;
+                }
+                i++;
+            } else {
+                i++;
+            }
+            NP n = mk(RegexNode::Type::CLASS);
+            n->big_class = true;
+            return n;
+        }
+        case 'n':
+            i++;
+            return make_lit('\n');
+        case 't':
+            i++;
+            return make_lit('\t');
+        case 'r':
+            i++;
+            return make_lit('\r');
+        case 'x': {
+            i++;
+            std::vector<uint32_t> tmp;
+            bool big = false;
+            i--;
+            class_escape(&tmp, &big);
+            return make_lit(tmp.empty() ? 0 : tmp[0]);
+        }
+        case 'Q': { // \Q...\E 字面量
+            i++;
+            NP cat = mk(RegexNode::Type::CAT);
+            while (!eof() && !(peek() == '\\' && i + 1 < p.size() && p[i + 1] == 'E')) {
+                std::string u;
+                uint32_t cp = next_cp(&u);
+                cat->kids.push_back(make_lit(cp));
+            }
+            if (!eof()) {
+                i += 2;
+            }
+            return cat;
+        }
+        default: {
+            std::string u;
+            uint32_t cp = next_cp(&u);
+            return make_lit(cp);
+        }
+        }
+    }
+
+    // parse_atom 里 '(' 分支：解析捕获组 / 非捕获组 `(?:...)` / 命名组
+    // `(?P<name>...)`、`(?<name>...)` 与内联标志 `(?i) (?is) (?i:...)`，随后
+    // 递归解析组内内容并校验闭合括号，同时维护 kMaxNestingDepth 递归深度上限。
+    // 调用时前导 '(' 已被消费。从 parse_atom 抽出以降低其复杂度/长度，语义与
+    // 原内联代码完全一致。
+    NP parse_group() {
+        if (peek() == '?') {
+            i++;
+            if (peek() == ':') {
+                i++;
+            } else if (peek() == 'P' || peek() == '<') { // 命名组
+                if (peek() == 'P') {
+                    i++;
+                }
+                if (peek() != '<') {
+                    ok = false;
+                    err = "bad group";
+                    return nullptr;
+                }
+                while (!eof() && peek() != '>') {
+                    i++;
+                }
+                i++;
+            } else { // 标志 (?i) (?is) (?i:...)
+                bool neg = false;
+                while (!eof() && peek() != ')' && peek() != ':') {
+                    char f = peek();
+                    i++;
+                    if (f == '-') {
+                        neg = true;
+                    } else if (f == 'i') {
+                        icase = !neg;
+                    } else if (f == 's' || f == 'm' || f == 'U') {
+                        // 已识别但不影响 AST 结构：(?s)(?m)(?U) 不改变
+                        // 字面量/类的匹配集合，gram 编译不需要区分。
+                    } else {
+                        ok = false;
+                        err = "unknown flag";
+                        return nullptr;
+                    }
+                }
+                if (peek() == ')') {
+                    i++;
+                    return nullptr;
+                }
+                i++; // ':'
+            }
+        }
+        depth++;
+        if (depth > kMaxNestingDepth) {
+            ok = false;
+            err = "regex nesting too deep";
+            depth--;
+            return nullptr;
+        }
+        NP inner = parse_alt();
+        depth--;
+        if (peek() != ')') {
+            ok = false;
+            err = "missing )";
+            return inner;
+        }
+        i++;
+        return inner;
+    }
+
     NP parse_atom() {
         char c = peek();
         if (c == '(') {
             i++;
-            if (peek() == '?') {
-                i++;
-                if (peek() == ':') {
-                    i++;
-                } else if (peek() == 'P' || peek() == '<') { // 命名组
-                    if (peek() == 'P') {
-                        i++;
-                    }
-                    if (peek() != '<') {
-                        ok = false;
-                        err = "bad group";
-                        return nullptr;
-                    }
-                    while (!eof() && peek() != '>') {
-                        i++;
-                    }
-                    i++;
-                } else { // 标志 (?i) (?is) (?i:...)
-                    bool neg = false;
-                    while (!eof() && peek() != ')' && peek() != ':') {
-                        char f = peek();
-                        i++;
-                        if (f == '-') {
-                            neg = true;
-                        } else if (f == 'i') {
-                            icase = !neg;
-                        } else if (f == 's' || f == 'm' || f == 'U') {
-                            // 已识别但不影响 AST 结构：(?s)(?m)(?U) 不改变
-                            // 字面量/类的匹配集合，gram 编译不需要区分。
-                        } else {
-                            ok = false;
-                            err = "unknown flag";
-                            return nullptr;
-                        }
-                    }
-                    if (peek() == ')') {
-                        i++;
-                        return nullptr;
-                    }
-                    i++; // ':'
-                }
-            }
-            depth++;
-            if (depth > kMaxNestingDepth) {
-                ok = false;
-                err = "regex nesting too deep";
-                depth--;
-                return nullptr;
-            }
-            NP inner = parse_alt();
-            depth--;
-            if (peek() != ')') {
-                ok = false;
-                err = "missing )";
-                return inner;
-            }
-            i++;
-            return inner;
+            return parse_group();
         }
         if (c == '[') {
             i++;
@@ -550,76 +644,7 @@ struct Parser {
                 err = "trailing backslash";
                 return nullptr;
             }
-            char e = peek();
-            switch (e) {
-            case 'd':
-            case 'w':
-            case 's':
-            case 'D':
-            case 'W':
-            case 'S': {
-                i++;
-                NP n = mk(RegexNode::Type::CLASS);
-                n->big_class = true;
-                return n;
-            }
-            case 'b':
-            case 'B':
-            case 'A':
-            case 'z':
-                i++;
-                return mk(RegexNode::Type::EMPTY);
-            case 'p':
-            case 'P': {
-                i++;
-                if (peek() == '{') {
-                    while (!eof() && peek() != '}') {
-                        i++;
-                    }
-                    i++;
-                } else {
-                    i++;
-                }
-                NP n = mk(RegexNode::Type::CLASS);
-                n->big_class = true;
-                return n;
-            }
-            case 'n':
-                i++;
-                return make_lit('\n');
-            case 't':
-                i++;
-                return make_lit('\t');
-            case 'r':
-                i++;
-                return make_lit('\r');
-            case 'x': {
-                i++;
-                std::vector<uint32_t> tmp;
-                bool big = false;
-                i--;
-                class_escape(&tmp, &big);
-                return make_lit(tmp.empty() ? 0 : tmp[0]);
-            }
-            case 'Q': { // \Q...\E 字面量
-                i++;
-                NP cat = mk(RegexNode::Type::CAT);
-                while (!eof() && !(peek() == '\\' && i + 1 < p.size() && p[i + 1] == 'E')) {
-                    std::string u;
-                    uint32_t cp = next_cp(&u);
-                    cat->kids.push_back(make_lit(cp));
-                }
-                if (!eof()) {
-                    i += 2;
-                }
-                return cat;
-            }
-            default: {
-                std::string u;
-                uint32_t cp = next_cp(&u);
-                return make_lit(cp);
-            }
-            }
+            return parse_backslash_escape();
         }
         if (c == '*' || c == '+' || c == '?') {
             ok = false;

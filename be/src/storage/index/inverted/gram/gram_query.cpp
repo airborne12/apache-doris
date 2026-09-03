@@ -24,6 +24,15 @@
 
 namespace doris::segment_v2::gram {
 
+// BE 的 Storage 目标开启了 CMake Unity Build（多个 .cpp 合并编译，见
+// be/src/storage/CMakeLists.txt 的 UNITY_BUILD_BATCH_SIZE），同一批次内所有
+// 文件的匿名命名空间会被合并进同一个翻译单元，裸的匿名命名空间一旦与批次内
+// 其他文件重名（哪怕在不同 .cpp 里）就会重定义报错，且批次分组会随目录下
+// 文件增删而变化，无法长期假设「这批次只有这几个文件」。因此这里额外套一层
+// 本文件专属的具名命名空间，隔离本文件的匿名命名空间，不影响其中各符号本身
+// 仍是内部链接（匿名命名空间语义不受具名外层嵌套影响）。
+namespace gram_query_detail {
+
 namespace {
 
 // gram 去重并按字典序排序，作为 AND/OR 节点 grams 字段的规范形态。
@@ -88,6 +97,8 @@ void or_absorb_subsets(std::vector<GramQuery>& subs) {
 
 } // namespace
 
+} // namespace gram_query_detail
+
 GramQuery GramQuery::and_(GramQuery a, GramQuery b) {
     if (a.is_none() || b.is_none()) {
         return none();
@@ -111,15 +122,15 @@ GramQuery GramQuery::and_(GramQuery a, GramQuery b) {
             r.subs.push_back(std::move(*x));
         }
     }
-    dedupe_grams(r.grams);
+    gram_query_detail::dedupe_grams(r.grams);
     // 吸收律：AND 内已有 gram g，则含 g 的子 OR 恒真（OR 只需其中一支满足），
     // 对整个 AND 不再构成约束，可整体删除。
     std::vector<GramQuery> keep;
     for (auto& s : r.subs) {
         bool absorbed = false;
         if (s.op == Op::OR) {
-            for (auto& g : s.grams) {
-                if (has_gram(r.grams, g)) {
+            for (const auto& g : s.grams) {
+                if (gram_query_detail::has_gram(r.grams, g)) {
                     absorbed = true;
                     break;
                 }
@@ -130,10 +141,10 @@ GramQuery GramQuery::and_(GramQuery a, GramQuery b) {
         }
     }
     r.subs = std::move(keep);
-    dedupe_subs(r.subs);
+    gram_query_detail::dedupe_subs(r.subs);
     // 单元素退化：AND 没有直属 gram、只剩一个子查询时，等价于该子查询本身。
     if (r.grams.empty() && r.subs.size() == 1) {
-        return r.subs[0];
+        return std::move(r.subs[0]);
     }
     return r;
 }
@@ -164,15 +175,15 @@ GramQuery GramQuery::or_(GramQuery a, GramQuery b) {
             r.subs.push_back(std::move(*x));
         }
     }
-    dedupe_grams(r.grams);
+    gram_query_detail::dedupe_grams(r.grams);
     // 吸收律：OR 内已有 gram g，则含 g 的子 AND 恒被 g 蕴含（AND 要求同时满足，
     // 其中一个条件已在 OR 的其他分支满足），对整个 OR 不再构成约束，可删除。
     std::vector<GramQuery> keep;
     for (auto& s : r.subs) {
         bool absorbed = false;
         if (s.op == Op::AND) {
-            for (auto& g : s.grams) {
-                if (has_gram(r.grams, g)) {
+            for (const auto& g : s.grams) {
+                if (gram_query_detail::has_gram(r.grams, g)) {
                     absorbed = true;
                     break;
                 }
@@ -183,21 +194,21 @@ GramQuery GramQuery::or_(GramQuery a, GramQuery b) {
         }
     }
     r.subs = std::move(keep);
-    dedupe_subs(r.subs);
-    or_absorb_subsets(r.subs);
+    gram_query_detail::dedupe_subs(r.subs);
+    gram_query_detail::or_absorb_subsets(r.subs);
     // 单元素退化。
     if (r.grams.size() == 1 && r.subs.empty()) {
         return of_gram(r.grams[0]);
     }
     if (r.grams.empty() && r.subs.size() == 1) {
-        return r.subs[0];
+        return std::move(r.subs[0]);
     }
     return r;
 }
 
 size_t GramQuery::leaf_count() const {
     size_t c = grams.size();
-    for (auto& s : subs) {
+    for (const auto& s : subs) {
         c += s.leaf_count();
     }
     return c;
@@ -216,7 +227,7 @@ std::string GramQuery::serialize() const {
     }
     std::string s = op == Op::AND ? "&(" : "|(";
     bool first = true;
-    for (auto& g : grams) {
+    for (const auto& g : grams) {
         if (!first) {
             s += ',';
         }
@@ -227,11 +238,11 @@ std::string GramQuery::serialize() const {
     }
     // 子查询按各自 serialize() 文本排序后输出，保证结构相同则文本相同。
     std::vector<std::string> ks;
-    for (auto& c : subs) {
+    for (const auto& c : subs) {
         ks.push_back(c.serialize());
     }
     std::sort(ks.begin(), ks.end());
-    for (auto& k : ks) {
+    for (const auto& k : ks) {
         if (!first) {
             s += ',';
         }
@@ -241,11 +252,38 @@ std::string GramQuery::serialize() const {
     return s + ")";
 }
 
+namespace gram_query_detail {
+
 namespace {
 
 // AND/OR 允许嵌套的最大深度（顶层调用为 1）。超过后立即拒绝，避免形如重复
 // "&(" 的畸形/恶意输入递归过深导致爆栈（本仓库有过深递归爆栈先例 CIR-21633）。
 constexpr int kMaxNestingDepth = 64;
+
+// 解析 AND/OR item 列表里的一个 base64 gram token（即 t[i] 不是 &/|/*/! 之一、
+// parse_at 判定为普通 item 的情形）：从 t[i] 起扫到下一个 ',' 或 ')' 作为 token
+// 边界，base64 解码后包成 GramQuery::of_gram；解析成功后 i 指向该 token 结束
+// 后的下一个位置（未消费分隔符本身）。从 parse_at 抽出以降低其复杂度，语义与
+// 原内联的 else 分支完全一致。
+Status parse_gram_token(std::string_view t, size_t& i, GramQuery* out) {
+    size_t j = i;
+    while (j < t.size() && t[j] != ',' && t[j] != ')') {
+        j++;
+    }
+    if (j == i) {
+        return Status::InvalidArgument("gram query empty item at {}", i);
+    }
+    std::string dec;
+    if (!doris::base64_decode(std::string(t.substr(i, j - i)), &dec)) {
+        return Status::InvalidArgument("gram query bad base64 at {}", i);
+    }
+    if (dec.empty()) {
+        return Status::InvalidArgument("gram query empty gram at {}", i);
+    }
+    *out = GramQuery::of_gram(std::move(dec));
+    i = j;
+    return Status::OK();
+}
 
 // 从 t[i] 起解析一个 GramQuery；解析成功后 i 指向该查询结束后的下一个位置。
 // depth 为当前嵌套深度（顶层调用为 1），用于限制递归层数，防止爆栈。
@@ -293,22 +331,7 @@ Status parse_at(std::string_view t, size_t& i, int depth, GramQuery* out) {
         if (t[i] == '&' || t[i] == '|' || t[i] == '*' || t[i] == '!') {
             RETURN_IF_ERROR(parse_at(t, i, depth + 1, &item));
         } else {
-            size_t j = i;
-            while (j < t.size() && t[j] != ',' && t[j] != ')') {
-                j++;
-            }
-            if (j == i) {
-                return Status::InvalidArgument("gram query empty item at {}", i);
-            }
-            std::string dec;
-            if (!doris::base64_decode(std::string(t.substr(i, j - i)), &dec)) {
-                return Status::InvalidArgument("gram query bad base64 at {}", i);
-            }
-            if (dec.empty()) {
-                return Status::InvalidArgument("gram query empty gram at {}", i);
-            }
-            item = GramQuery::of_gram(std::move(dec));
-            i = j;
+            RETURN_IF_ERROR(parse_gram_token(t, i, &item));
         }
         count++;
         acc = is_and ? GramQuery::and_(std::move(acc), std::move(item))
@@ -335,13 +358,15 @@ Status parse_at(std::string_view t, size_t& i, int depth, GramQuery* out) {
 
 } // namespace
 
+} // namespace gram_query_detail
+
 Status GramQuery::parse(std::string_view text, GramQuery* out) {
     size_t i = 0;
     // 先解析到局部变量：只有整体成功（且没有尾随输入）才写回 *out，避免调用方
     // 在解析失败时观察到半成品树（例如旧实现里 trailing-input 场景下 *out
     // 已经被写入了顶层 token 对应的半成品结果）。
     GramQuery local;
-    RETURN_IF_ERROR(parse_at(text, i, /*depth=*/1, &local));
+    RETURN_IF_ERROR(gram_query_detail::parse_at(text, i, /*depth=*/1, &local));
     if (i != text.size()) {
         return Status::InvalidArgument("gram query trailing input");
     }
@@ -359,14 +384,14 @@ std::string GramQuery::to_debug_string() const {
     std::string sep = op == Op::AND ? " & " : " | ";
     std::string s = "(";
     bool first = true;
-    for (auto& g : grams) {
+    for (const auto& g : grams) {
         if (!first) {
             s += sep;
         }
         first = false;
         s += "\"" + g + "\"";
     }
-    for (auto& c : subs) {
+    for (const auto& c : subs) {
         if (!first) {
             s += sep;
         }

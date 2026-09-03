@@ -21,6 +21,15 @@
 
 namespace doris::segment_v2::gram {
 
+// BE 的 Storage 目标开启了 CMake Unity Build（多个 .cpp 合并编译，见
+// be/src/storage/CMakeLists.txt 的 UNITY_BUILD_BATCH_SIZE），同一批次内所有
+// 文件的匿名命名空间会被合并进同一个翻译单元，裸的匿名命名空间一旦与批次内
+// 其他文件重名（哪怕在不同 .cpp 里）就会重定义报错，且批次分组会随目录下
+// 文件增删而变化，无法长期假设「这批次只有这几个文件」。因此这里额外套一层
+// 本文件专属的具名命名空间，隔离本文件的匿名命名空间，不影响其中各符号本身
+// 仍是内部链接（匿名命名空间语义不受具名外层嵌套影响）。
+namespace gram_extractor_detail {
+
 namespace {
 
 // splitmix64 的 finalizer，用作字节对 (a,b) 的边界哈希混合函数；必须与原型
@@ -68,6 +77,8 @@ inline size_t codepoint_len(const char* p, size_t remain) {
 
 } // namespace
 
+} // namespace gram_extractor_detail
+
 GramExtractor::GramExtractor(const GramScheme& scheme) : _scheme(scheme) {
     _build_boundary_table();
 }
@@ -77,7 +88,7 @@ void GramExtractor::_build_boundary_table() {
     const uint64_t threshold = (uint64_t)_scheme.density_permille * 65536ULL / 1000ULL;
     for (unsigned idx = 0; idx < 65536; idx++) {
         uint64_t key = ((uint64_t)idx) ^ 0x5bd1e995ULL; // idx = (a<<8)|b
-        if ((mix64(key) & 0xFFFF) < threshold) {
+        if ((gram_extractor_detail::mix64(key) & 0xFFFF) < threshold) {
             _boundary_bits[idx >> 3] |= (uint8_t)(1U << (idx & 7));
         }
     }
@@ -160,7 +171,7 @@ void GramExtractor::extract(std::string_view value, std::vector<std::string_view
             i = j;
         } else {
             // 非 ASCII：一个合法码点（或一个非法字节）产出一个 1-gram。
-            size_t l = codepoint_len(value.data() + i, L - i);
+            size_t l = gram_extractor_detail::codepoint_len(value.data() + i, L - i);
             out->push_back(value.substr(i, l));
             i += l;
         }

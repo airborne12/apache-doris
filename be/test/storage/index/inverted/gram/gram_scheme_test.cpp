@@ -24,9 +24,9 @@ namespace doris::segment_v2::gram {
 TEST(GramSchemeTest, DefaultsAndRoundTrip) {
     GramScheme s;
     EXPECT_EQ(s.mode, GramMode::SPARSE);
-    EXPECT_EQ(s.min_len, 3u);
-    EXPECT_EQ(s.max_len, 16u);
-    EXPECT_EQ(s.density_permille, 250u);
+    EXPECT_EQ(s.min_len, 3U);
+    EXPECT_EQ(s.max_len, 16U);
+    EXPECT_EQ(s.density_permille, 250U);
     GramScheme back;
     ASSERT_TRUE(GramScheme::from_properties(s.to_properties(), &back).ok());
     EXPECT_TRUE(s == back);
@@ -40,10 +40,10 @@ TEST(GramSchemeTest, ParsesTokenizerProperties) {
     GramScheme s;
     ASSERT_TRUE(GramScheme::from_properties(props, &s).ok());
     EXPECT_EQ(s.mode, GramMode::DENSE);
-    EXPECT_EQ(s.min_len, 4u);
-    EXPECT_EQ(s.max_len, 24u);
-    EXPECT_EQ(s.density_permille, 330u);
-    EXPECT_EQ(s.stop_df_permille, 250u);
+    EXPECT_EQ(s.min_len, 4U);
+    EXPECT_EQ(s.max_len, 24U);
+    EXPECT_EQ(s.density_permille, 330U);
+    EXPECT_EQ(s.stop_df_permille, 250U);
     EXPECT_TRUE(s.lower_case);
 }
 
