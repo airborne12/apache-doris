@@ -29,6 +29,12 @@ namespace doris::segment_v2::gram {
 // （CDC）规则，依据字节对边界哈希切出变长 gram。切分规则只依赖局部字节内容（当前
 // 位置起、至多 max_len 字节的窗口），因此查询侧对字面量重新提取时，得到的 gram
 // 集合必然是索引侧对整行提取结果的子集，可用于编译器折叠正则字面量。
+//
+// Ruling R9：产出的 gram 一律不含 NUL 字节（0x00）。候选窗口只要跨过 NUL 就整体
+// 跳过、不产出，窗口边界本身的计算不受影响（局部性不因此被破坏）；非 ASCII 码点
+// 走 1-gram 路径，天然不可能含 NUL，无需额外处理。RegexGramCompiler 一侧对含
+// NUL 的字面量 / 类项同样退化为不可索引的未知字符（当作 anyChar），索引与查询
+// 两侧口径保持一致，避免 NUL 字节被单独一侧当作可索引内容而导致误杀。
 class GramExtractor {
 public:
     explicit GramExtractor(const GramScheme& scheme);

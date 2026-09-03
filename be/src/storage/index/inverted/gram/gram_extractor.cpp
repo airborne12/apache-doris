@@ -102,7 +102,12 @@ void GramExtractor::_ascii_segment(std::string_view seg, std::vector<std::string
     }
     if (_scheme.mode == GramMode::DENSE) {
         for (size_t i = 0; i + n <= L; i++) {
-            out->push_back(seg.substr(i, n));
+            // Ruling R9：候选 gram 含 NUL 字节（0x00）就整体跳过，不产出、也不
+            // 影响其余窗口——窗口边界计算本身与是否含 NUL 无关。
+            std::string_view g = seg.substr(i, n);
+            if (g.find('\0') == std::string_view::npos) {
+                out->push_back(g);
+            }
         }
         return;
     }
@@ -132,7 +137,11 @@ void GramExtractor::_ascii_segment(std::string_view seg, std::vector<std::string
                 continue;
             }
         }
-        out->push_back(seg.substr(k, end - k));
+        // Ruling R9：同上，候选 gram 含 NUL 就跳过，边界（k/end）计算不受影响。
+        std::string_view g = seg.substr(k, end - k);
+        if (g.find('\0') == std::string_view::npos) {
+            out->push_back(g);
+        }
     }
 }
 

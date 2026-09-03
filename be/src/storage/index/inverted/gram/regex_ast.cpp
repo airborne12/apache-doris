@@ -267,6 +267,54 @@ struct Parser {
         return a;
     }
 
+    // class_escape 里 `\x` 转义的十六进制取值：调用时 "\x" 已被消费（i 指向
+    // 花括号或首个十六进制数字）。Ruling R12：`\x{...}` 形式要求花括号内至少
+    // 一位十六进制数字且必须闭合；裸 `\xHH` 形式要求恰好两位十六进制数字，
+    // 不足（到串尾或遇到非十六进制字符）一律报错，与 RE2 拒绝 `\x4` 的行为
+    // 对齐。成功时把值写入 *v 并返回 true；失败则置 ok=false、err 并返回
+    // false（调用方据此直接 return，不再继续）。从 class_escape 抽出以降低
+    // 其复杂度/长度，语义与原内联代码完全一致。
+    bool parse_hex_escape_value(uint32_t* v) {
+        *v = 0;
+        if (peek() == '{') {
+            i++;
+            int cnt = 0;
+            while (!eof() && peek() != '}') {
+                if (!std::isxdigit(static_cast<unsigned char>(peek()))) {
+                    ok = false;
+                    err = "bad \\x escape";
+                    return false;
+                }
+                *v = *v * 16 +
+                     (std::isdigit(static_cast<unsigned char>(peek()))
+                              ? peek() - '0'
+                              : (std::tolower(static_cast<unsigned char>(peek())) - 'a' + 10));
+                i++;
+                cnt++;
+            }
+            if (eof() || cnt == 0) {
+                ok = false;
+                err = "bad \\x escape";
+                return false;
+            }
+            i++; // 消费 '}'
+            return true;
+        }
+        for (int cnt = 0; cnt < 2; cnt++) {
+            if (eof() || !std::isxdigit(static_cast<unsigned char>(peek()))) {
+                ok = false;
+                err = "bad \\x escape";
+                return false;
+            }
+            *v = *v * 16 +
+                 (std::isdigit(static_cast<unsigned char>(peek()))
+                          ? peek() - '0'
+                          : (std::tolower(static_cast<unsigned char>(peek())) - 'a' + 10));
+            i++;
+        }
+        return true;
+    }
+
     // 把类里的一个码点或转义加入 out（大类置 big）。
     void class_escape(std::vector<uint32_t>* out, bool* big) {
         // 调用方总是先消费了触发转义的 '\\' 再调用本函数；若此时已经 eof，说明
@@ -300,26 +348,8 @@ struct Parser {
             break;
         case 'x': {
             uint32_t v = 0;
-            int cnt = 0;
-            if (peek() == '{') {
-                i++;
-                while (!eof() && peek() != '}') {
-                    v = v * 16 +
-                        (std::isdigit(static_cast<unsigned char>(peek()))
-                                 ? peek() - '0'
-                                 : (std::tolower(static_cast<unsigned char>(peek())) - 'a' + 10));
-                    i++;
-                }
-                i++;
-            } else {
-                while (cnt < 2 && !eof() && std::isxdigit(static_cast<unsigned char>(peek()))) {
-                    v = v * 16 +
-                        (std::isdigit(static_cast<unsigned char>(peek()))
-                                 ? peek() - '0'
-                                 : (std::tolower(static_cast<unsigned char>(peek())) - 'a' + 10));
-                    i++;
-                    cnt++;
-                }
+            if (!parse_hex_escape_value(&v)) {
+                return;
             }
             out->push_back(v);
             break;

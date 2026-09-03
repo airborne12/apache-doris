@@ -148,4 +148,24 @@ TEST(RegexAstTest, IcaseClassBigClassInvariant) {
     EXPECT_EQ(cls_node2->cls, (std::vector<std::string> {"A", "B", "a", "b"}));
 }
 
+// 覆盖 kMaxNestingDepth（64）分组嵌套上限的回归测试：纯左括号（未闭合）与配平的
+// 深嵌套括号都必须在超过上限时报错，而不是继续递归直至爆栈或产出畸形树。
+TEST(RegexAstTest, NestingDepthCapped) {
+    EXPECT_EQ(parse_dump(std::string(70, '(')), "ERR");
+    EXPECT_EQ(parse_dump(std::string(70, '(') + "a" + std::string(70, ')')), "ERR");
+}
+
+// 覆盖 Ruling R12：`\x` 转义硬化。裸 `\xHH` 形式必须恰好两位十六进制数字，
+// 不足两位（到达串尾或遇到非十六进制字符）一律报错，与 RE2 拒绝 `\x4` 的
+// 行为对齐；`\x{...}` 形式必须有合法的十六进制内容且闭合，否则同样报错。
+TEST(RegexAstTest, HexEscapeHardening) {
+    EXPECT_EQ(parse_dump("\\x4"), "ERR");
+    EXPECT_EQ(parse_dump("\\x"), "ERR");
+    EXPECT_EQ(parse_dump("\\x4g"), "ERR");
+    EXPECT_EQ(parse_dump("\\x41"), "cat('A',)");
+    EXPECT_EQ(parse_dump("\\x{41}"), "cat('A',)");
+    EXPECT_EQ(parse_dump("[\\x4]"), "ERR");
+    EXPECT_EQ(parse_dump("\\x{4"), "ERR");
+}
+
 } // namespace doris::segment_v2::gram

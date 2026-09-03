@@ -84,6 +84,29 @@ TEST(GramExtractorTest, LowerCaseFoldsBeforeBoundaryHash) {
     EXPECT_EQ(run(s, "Code = Unavailable"), run(s, "code = unavailable"));
 }
 
+// 覆盖 Ruling R9：提取器绝不产出含 NUL 字节（0x00）的 gram。
+TEST(GramExtractorTest, NoGramContainsNulByte) {
+    // DENSE n=3："ab\0cd"（5 字节）的三个窗口 "ab\0" "b\0c" "\0cd" 全部含 NUL，
+    // 应全部被跳过，不改变窗口边界的计算方式，只是不产出。
+    GramScheme dense;
+    dense.mode = GramMode::DENSE;
+    dense.min_len = 3;
+    EXPECT_EQ(run(dense, std::string("ab\0cd", 5)), (std::vector<std::string> {}));
+
+    // SPARSE：更长的字符串中间嵌入一个 NUL，跨过 NUL 的候选 gram 被跳过，但
+    // 远离 NUL 的部分仍应正常产出 gram（局部性不受影响）。
+    GramScheme sparse; // 默认 SPARSE，p=0.25 n=3 max_len=16
+    GramExtractor ex(sparse);
+    std::string doc = "rpc error: code = Unavailable desc = error reading from server";
+    doc.insert(doc.begin() + 10, '\0');
+    std::vector<std::string_view> out;
+    ex.extract(doc, &out);
+    ASSERT_FALSE(out.empty());
+    for (const auto& g : out) {
+        EXPECT_EQ(g.find('\0'), std::string_view::npos) << "gram '" << g << "' contains NUL";
+    }
+}
+
 TEST(GramExtractorTest, BoundaryTableMatchesFormula) {
     GramScheme s;
     GramExtractor ex(s);
