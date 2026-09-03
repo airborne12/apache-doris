@@ -7,7 +7,7 @@
 
 **问题**：Doris 的 `REGEXP` 目前只能全表逐行跑 hyperscan/re2；现有 NGRAM_BF 索引是页级定长布隆、只服务 LIKE，且实测对未聚簇日志几乎没有裁剪能力（1024 行块级：1.0×）。
 
-**方案**：不新增索引类型与分词器类型，复用 INVERTED 索引与现有 `ngram` 分词器（新增 auto/sparse 模式，零配置 `"parser"="ngram"`），以 **内容定义边界的稀疏 gram（CDC-gram）** 建 **行级** DOCS_ONLY 倒排（V4 SPIMI 存储、两层 posting 表示：高频 gram 走词典 + PFOR，稀有 gram 走指纹表，超高频 gram 按 FREE 阈值裁成 stop-gram），配 **Cox 式正则→gram 布尔查询编译器**；查询时索引给出候选行位图（未命中页不读），原 REGEXP 表达式保留在 common expr 阶段对候选 Block 做 **BLARE 字面量预检 + Hyperscan** 复验。非 ASCII 码点按「字」建 1-gram，ASCII 段按 CDC 字节 gram。
+**方案**：不新增索引类型与分词器类型，复用 INVERTED 索引与索引策略框架里现有的 `ngram` tokenizer（新增 auto/sparse 模式；不动 `parser`），以 **内容定义边界的稀疏 gram（CDC-gram）** 建 **行级** DOCS_ONLY 倒排（V4 SPIMI 存储、两层 posting 表示：高频 gram 走词典 + PFOR，稀有 gram 走指纹表，超高频 gram 按 FREE 阈值裁成 stop-gram），配 **Cox 式正则→gram 布尔查询编译器**；查询时索引给出候选行位图（未命中页不读），原 REGEXP 表达式保留在 common expr 阶段对候选 Block 做 **BLARE 字面量预检 + Hyperscan** 复验。非 ASCII 码点按「字」建 1-gram，ASCII 段按 CDC 字节 gram。
 
 **结论（在 4 个真实语料、82 条正则上用原型量化）**：
 
@@ -49,7 +49,7 @@
 ### 1.4 本文假设（后台作业无法与用户实时确认，评审时请重点核对）
 
 - A1：目标负载是观测型日志/消息检索（模式含 ≥ 8 字节字面量、中位选择率 ≤ 1–2%）；若目标是低熵短串（URL/枚举）为主，默认应改为稠密模式 mode=dense（§4.8）。
-- A2：以 INVERTED 索引 + 现有 `ngram` 分词器新模式的形式交付，不新增 `IndexType` 也不新增 tokenizer 类型（产品层只有一个 n-gram 概念；改动面最小、复用 V4 与 SNII 演进）。
+- A2：以 INVERTED 索引 + 索引策略框架现有 `ngram` tokenizer 新模式的形式交付，不新增 `IndexType`、不新增 tokenizer 类型、不动 `parser`（产品层只有一个 n-gram 概念；改动面最小、复用 V4 与 SNII 演进）。
 - A3：允许 P0 先不做两层存储（体积 ≈ 33% → P1 降到 ≈ 25%）。
 - A4：hyperscan 保持为复验引擎（Doris 已静态链接 5.4.2）。
 
@@ -280,7 +280,7 @@ textbench，稠密 3-gram 行级，REAL 口径（候选数 ≈ 真值数，说�
 | 列特征 | 推荐 | 预期体积 | 预期效果 |
 |---|---|---|---|
 | 日志/消息类短文本（≤ 数百字节，ASCII 为主） | `ngram` mode=sparse, p=0.25, n=3, L=16, τ=0.10 | 22–28% | 选择率 ≤1% 查询 ≥ 30×，1–3% 查询 5–20× |
-| 不确定 / 混合 | `"parser"="ngram"`（auto，§6.1.7：按段样本统计自动选上述之一） | 随段而定 | 与人工选择一致 |
+| 不确定 / 混合 | `ngram` mode=auto（§6.1.7：按段样本统计自动选上述之一） | 随段而定 | 与人工选择一致 |
 | CJK 为主短文本 | 自动：非 ASCII 码点 1-gram + ASCII 段 CDC | 16–26% | 中位 48–75× |
 | 低熵短串（URL、路径、枚举型） | `ngram` mode=dense, n=3, τ=0.25（预算优先时 mode=sparse p=0.40） | 41%（稀疏 29%） | 可索引查询中位 20.5×（稀疏 6.5×），宽泛查询 1–2× |
 | 长文本（≥ 4 KB） | `ngram` mode=dense, n=3；P2 开位置 | ≈ 10% | v1 2×，P2 位置局部化后预期 ≥ 10× |
@@ -291,7 +291,7 @@ textbench，稠密 3-gram 行级，REAL 口径（候选数 ≈ 真值数，说�
 
 ### 5.1 一句话
 
-在 Doris 现有 INVERTED 索引与 `ngram` 分词器上新增 **稀疏 / auto 模式**（不新增索引类型、不新增分词器类型，零配置 `"parser"="ngram"`），用 **内容定义边界的稀疏 gram（CDC-gram）** 建 **行级** DOCS_ONLY 倒排（V4 SPIMI 存储，两层 posting 表示），配一个 **Cox 式「正则 → gram 布尔查询」编译器**，把 `REGEXP / RLIKE / LIKE` 编译为 gram 查询求出候选行位图，未命中的页不读，命中的候选行再用 **BLARE 字面量预检 + Hyperscan** 复验。索引只做超集过滤，语义由原谓词兜底。
+在 Doris 现有 INVERTED 索引与索引策略框架的 `ngram` tokenizer 上新增 **稀疏 / auto 模式**（不新增索引类型、不新增 tokenizer 类型、不动 `parser`），用 **内容定义边界的稀疏 gram（CDC-gram）** 建 **行级** DOCS_ONLY 倒排（V4 SPIMI 存储，两层 posting 表示），配一个 **Cox 式「正则 → gram 布尔查询」编译器**，把 `REGEXP / RLIKE / LIKE` 编译为 gram 查询求出候选行位图，未命中的页不读，命中的候选行再用 **BLARE 字面量预检 + Hyperscan** 复验。索引只做超集过滤，语义由原谓词兜底。
 
 ### 5.2 架构图
 
@@ -380,7 +380,7 @@ textbench，稠密 3-gram 行级，REAL 口径（候选数 ≈ 真值数，说�
 
 **第 1 层：行内按脚本（自动，无需决策）**。§6.1.1 的规则本身就是自适应的：ASCII 段走 gram 方案，非 ASCII 码点走 1-gram，中英混排一行内同时成立。CJK 语料的问题在这一层已经解决。
 
-**第 2 层：段级自动选模式（`mode=auto`，即 `"parser"="ngram"` 的默认）**。索引写入器先攒一个样本（本段前 8,192 行或 4 MB 原值，二者先到为准；值只是暂存，内存可忽略），在样本上算三个统计量，据此锁定本段的方案并写入段级 index meta；随后正常流式提取。统计量与阈值全部来自 §4 的四个语料：
+**第 2 层：段级自动选模式（tokenizer 参数 `mode=auto`）**。索引写入器先攒一个样本（本段前 8,192 行或 4 MB 原值，二者先到为准；值只是暂存，内存可忽略），在样本上算三个统计量，据此锁定本段的方案并写入段级 index meta；随后正常流式提取。统计量与阈值全部来自 §4 的四个语料：
 
 | 统计量 | 含义 | textbench | weibo | httplogs | wikipedia |
 |---|---|---|---|---|---|
@@ -408,46 +408,46 @@ textbench，稠密 3-gram 行级，REAL 口径（候选数 ≈ 真值数，说�
 
 #### 6.2.1 用户接口：不新增概念，复用 INVERTED 与现有 `ngram` 分词器
 
-产品层原则（奥卡姆剃刀）：Doris 里已经有两处 n-gram——自定义分词器框架的 `ngram`/`edge_ngram` tokenizer，以及 `NGRAM_BF` 索引。本方案**不引入第三个**，也不新增 `USING NGRAM` 之类的索引类型。用户面只有一句话：**n-gram 是 INVERTED 索引的一种分词方式，用什么函数查决定它怎么用。**
+产品层原则（奥卡姆剃刀）：Doris 里已经有两处 n-gram——索引策略框架的内置 tokenizer `ngram`/`edge_ngram`，以及 `NGRAM_BF` 索引。本方案**不引入第三个**：不新增索引类型（不做 `USING NGRAM`），不新增 tokenizer 类型，也**不动 `parser`**——`parser` 的取值是内置语言 analyzer（none/standard/unicode/english/chinese/icu/basic/ik/kuromoji，`IndexPolicy.BUILTIN_ANALYZERS`），n-gram 不属于这一族。用户面只有一句话：**n-gram 是 INVERTED 索引的一种分词方式，用什么函数查决定它怎么用。**
 
 - 索引类型：仍是 `INVERTED`。
-- 分词：零配置走内置 parser 别名 `ngram`（`"parser"="ngram"`，等价于 auto 模式）；要调参走现有 `CREATE INVERTED INDEX TOKENIZER ... "type"="ngram"` 框架，在**这个既有 tokenizer 上新增参数**，而不是新增 tokenizer 类型。
-- 查询：`MATCH_*` 在该索引上保持 token 语义（今天已如此）；`LIKE / REGEXP / RLIKE` 新增能力：只要列上的 INVERTED 索引的分词器属于 gram 族，就自动编译为 gram 查询走索引，建了即生效，不依赖 `enable_function_pushdown`。
+- 分词：全部走现有索引策略框架。内置 tokenizer `ngram`（`IndexPolicy.BUILTIN_TOKENIZERS`）新增参数 `mode`（auto | sparse | dense）、`density`、`stop_gram_df`；`min_gram`/`max_gram` 沿用原名，稀疏模式下即 n 与 L。策略是集群级对象，定义一次、多表复用。
+- 查询：`MATCH_*` 在该索引上保持 token 语义（今天已如此）；`LIKE / REGEXP / RLIKE` 新增能力：只要列上的 INVERTED 索引的 analyzer 以 `ngram` tokenizer 为分词器，就自动编译为 gram 查询走索引，建了即生效，不依赖 `enable_function_pushdown`。
 - `NGRAM_BF`：标记为 legacy，文档引导迁移，不再演进；同一列同时存在时 `LIKE` 优先走 INVERTED。
 
 ```sql
--- 零配置：auto 模式（按段样本自适应稀疏/稠密，非 ASCII 码点按字，见 §6.1.7）
-CREATE INDEX idx_msg ON logs(message) USING INVERTED PROPERTIES("parser"="ngram");
+-- 一次性：集群级策略，可被多张表复用
+CREATE INVERTED INDEX TOKENIZER gram_auto PROPERTIES("type" = "ngram", "mode" = "auto");
+CREATE INVERTED INDEX ANALYZER  gram_auto PROPERTIES("tokenizer" = "gram_auto");
 
--- 大小写不敏感：沿用现有属性
+-- 建索引：与任何自定义 analyzer 的 INVERTED 索引完全相同
+CREATE INDEX idx_msg ON logs(message) USING INVERTED PROPERTIES("analyzer" = "gram_auto");
+
+-- 大小写不敏感：沿用 INVERTED 既有属性（gram 族下在提取前折叠，见下）
 CREATE INDEX idx_msg ON logs(message) USING INVERTED
-PROPERTIES("parser"="ngram", "lower_case"="true");
+PROPERTIES("analyzer" = "gram_auto", "lower_case" = "true");
 
--- 需要调参：沿用现有自定义分词器框架，只在 ngram tokenizer 上加参数
-CREATE INVERTED INDEX TOKENIZER log_gram PROPERTIES(
-  "type"      = "ngram",
-  "mode"      = "sparse",      -- 新增：auto | sparse | dense（默认 auto；原有行为 = dense）
-  "min_gram"  = "3",           -- 原有参数：稀疏模式下即 n
-  "max_gram"  = "16",          -- 原有参数：稀疏模式下即 L
-  "density"   = "0.25",        -- 新增专家参数 p
-  "stop_gram_df" = "0.10"      -- 新增专家参数 τ
-);
-CREATE INVERTED INDEX ANALYZER log_gram PROPERTIES("tokenizer" = "log_gram");
-CREATE INDEX idx_msg ON logs(message) USING INVERTED PROPERTIES("analyzer" = "log_gram");
+-- 需要调参：同一 tokenizer 上的专家参数
+CREATE INVERTED INDEX TOKENIZER gram_log PROPERTIES(
+  "type" = "ngram", "mode" = "sparse",
+  "min_gram" = "3", "max_gram" = "16",          -- 稀疏模式下即 n 与 L
+  "density" = "0.25", "stop_gram_df" = "0.10"); -- p 与 τ
 ```
 
-兼容性：现有 `ngram` tokenizer 的默认行为（`min_gram=1`、`max_gram=2`、码点级、产出全部长度）保持不变，即 `mode=dense` 的一种取值；只有 `parser=ngram` 或显式 `mode=auto/sparse` 才启用新行为。已经用 `ngram` tokenizer 建好的 INVERTED 索引在升级后**自动获得** LIKE/REGEXP 加速：编译器按其 tokenizer 参数（稠密码点 gram）编译，无需重建。
+兼容性：内置 `ngram` tokenizer 的默认行为（`min_gram=1`、`max_gram=2`、码点级、产出全部长度）保持不变，即 `mode=dense` 的一种取值，直接在 ANALYZER 里写 `"tokenizer"="ngram"` 的老用法仍是老行为；只有显式 `mode=auto/sparse` 才启用新行为。已经用 `ngram` tokenizer 建好的 INVERTED 索引在升级后**自动获得** LIKE/REGEXP 加速：编译器按其 tokenizer 参数（稠密码点 gram）编译，无需重建。
+
+一个正确性约束：gram 族下的大小写折叠必须发生在**边界哈希之前**（相当于 char filter 阶段），否则查询字面量与数据的大小写不同时边界位置不同、gram 不同，会漏结果。因此 `lower_case=true` 对 gram 族的实现定义为「提取前对输入折叠」；analyzer 里的 `lowercase` token filter（提取后折叠）与 `mode=sparse/auto` 组合由校验器直接拒绝。
 
 用户抉择表（产品文档口径）：
 
 | 需求 | 建法 | 查法 |
 |---|---|---|
 | 分词全文检索（相关性、短语） | `INVERTED` + 语言 parser（english/chinese/unicode/…） | `MATCH_*` |
-| 子串 / 正则 / LIKE 加速 | `INVERTED` + `"parser"="ngram"` | `LIKE` / `REGEXP`，自动走索引 |
+| 子串 / 正则 / LIKE 加速 | `INVERTED` + `"analyzer"=<以 ngram 为 tokenizer 的 analyzer>` | `LIKE` / `REGEXP`，自动走索引 |
 | 两者都要 | 同列两个 INVERTED 索引（不同 analyzer）；需确认并放开现有「一列一个倒排索引」的限制（开放问题 Q4）。放开之前，ngram 索引也能服务 `MATCH_ALL`（token = gram 语义） | 各走各的函数 |
-| 老表已有 `NGRAM_BF` | 继续可用（仅 LIKE、页级）；建议 `DROP INDEX` 后改建 `INVERTED` + `ngram` | — |
+| 老表已有 `NGRAM_BF` | 继续可用（仅 LIKE、页级）；建议 `DROP INDEX` 后改建 `INVERTED` + ngram analyzer | — |
 
-实现映射（与前文一致）：`parser=ngram` → 内置 analyzer 别名 `InvertedIndexParserType::NGRAM`；tokenizer 参数 → 段级 index meta 的 `gram_scheme`（§6.2.3）；`GramExtractor` 作为 ngram tokenizer 的 auto/sparse 模式实现注册进现有 `analysis_factory_mgr`；`InvertedIndexColumnWriter::add_values` 在 gram 族分词器下 `omit_term_freq_and_positions=true`（v1）。
+实现映射（与前文一致）：FE `NGramTokenizerValidator` 新增三个参数的校验；tokenizer 参数 → 段级 index meta 的 `gram_scheme`（§6.2.3）；`GramExtractor` 作为 `ngram` tokenizer 的 auto/sparse 模式实现注册进现有 `analysis_factory_mgr`；`InvertedIndexColumnWriter::add_values` 在 gram 族分词器下 `omit_term_freq_and_positions=true`（v1）；BE 从 analyzer 定义识别「gram 族」的依据是 tokenizer type == ngram。
 
 #### 6.2.2 两层 posting 表示（P1）
 
@@ -587,7 +587,7 @@ CREATE INDEX idx_msg ON logs(message) USING INVERTED PROPERTIES("analyzer" = "lo
 
 ### 6.7 兼容性与降级
 
-- `parser=ngram` 与 auto/sparse 模式仅 V4（SPIMI）存储格式；V2/V3 存储格式下建索引报错「需要 inverted_index_storage_format=V4」。既有的稠密码点 `ngram` tokenizer 索引不受影响。
+- `ngram` tokenizer 的 auto/sparse 模式仅 V4（SPIMI）存储格式；V2/V3 存储格式下建索引报错「需要 inverted_index_storage_format=V4」。既有的稠密码点 `ngram` tokenizer 索引不受影响。
 - 旧 BE 读到 auto/sparse 模式的索引：索引不可用但数据可读；FE 版本校验在 tokenizer 参数校验处做。
 - 索引缺失/损坏/编译 ALL：一律退回现有 REGEXP 执行路径；任何索引侧错误只能导致「不加速」，不能改变结果。
 - 与 NGRAM_BF 并存：同一列允许同时有 NGRAM_BF（服务 LIKE 页级）与 gram 倒排（服务 REGEXP/LIKE 行级）；建议文档引导迁移。
@@ -633,7 +633,7 @@ CREATE INDEX idx_msg ON logs(message) USING INVERTED PROPERTIES("analyzer" = "lo
 
 **P0（可交付 MVP，约 4–6 周）**
 1. `GramExtractor`（dense/sparse/CJK 自适应，casefold）+ golden 测试；`RegexGramCompiler`（解析器、五元组、化简、LIKE 分支）+ 差分模糊测试。
-2. FE：`parser=ngram` 别名、`ngram` tokenizer 新参数（mode/density/stop_gram_df）校验、Nereids 下推标记、会话变量。
+2. FE：`ngram` tokenizer 新参数（mode/density/stop_gram_df）校验、gram 族 analyzer 识别、Nereids 下推标记、会话变量。
 3. BE：`GramExtractor` 作为 ngram tokenizer 的 auto/sparse 模式接入 `InvertedIndexColumnWriter`（V4 DOCS_ONLY，ASCII 段字节 gram + 非 ASCII 码点 1-gram，无需词典转义）、`FunctionRegexp/FunctionLike::evaluate_inverted_index`、`approximate` 语义改动、复验预检（memmem/hs 字面量）、profile 计数。
 4. 回归测试：正则语义对照（走索引 vs 不走索引结果一致）、NULL/空串/短值、NOT、`(?i)`、多段/多 rowset、delete bitmap、schema change、BUILD INDEX。
 5. 验收：§9.2 基准的 B1–B3。
