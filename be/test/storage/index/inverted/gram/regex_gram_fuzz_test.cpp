@@ -18,6 +18,7 @@
 #include <gtest/gtest.h>
 #include <re2/re2.h>
 
+#include <algorithm>
 #include <random>
 #include <set>
 
@@ -38,29 +39,11 @@ bool eval(const GramQuery& q, const std::set<std::string>& grams) {
     case GramQuery::Op::NONE:
         return false;
     case GramQuery::Op::AND:
-        for (auto& g : q.grams) {
-            if (!grams.count(g)) {
-                return false;
-            }
-        }
-        for (auto& s : q.subs) {
-            if (!eval(s, grams)) {
-                return false;
-            }
-        }
-        return true;
+        return std::ranges::all_of(q.grams, [&](const auto& g) { return grams.contains(g); }) &&
+               std::ranges::all_of(q.subs, [&](const auto& s) { return eval(s, grams); });
     case GramQuery::Op::OR:
-        for (auto& g : q.grams) {
-            if (grams.count(g)) {
-                return true;
-            }
-        }
-        for (auto& s : q.subs) {
-            if (eval(s, grams)) {
-                return true;
-            }
-        }
-        return false;
+        return std::ranges::any_of(q.grams, [&](const auto& g) { return grams.contains(g); }) ||
+               std::ranges::any_of(q.subs, [&](const auto& s) { return eval(s, grams); });
     }
     return true;
 }
@@ -120,6 +103,36 @@ std::string random_row(std::mt19937& rng) {
     return r;
 }
 
+// 对一条正则跑「编译 + 20 行差分校验」；从 TestBody 里抽出来是为了压低其认知
+// 复杂度（clang-tidy readability-function-cognitive-complexity，阈值 50）。
+// gtest 允许在返回 void 的普通函数里使用 ASSERT_*：失败时宏内部的 return 只会
+// 退出这个函数本身、不会自动终止调用方的循环，因此调用方每次调用后还需自行
+// 检查 HasFatalFailure() 才能保留「一发现假阴性就整体停止」的原始行为。
+void check_regex(GramMode mode, bool lc, GramExtractor& ex, RegexGramCompiler& comp,
+                 std::mt19937& rng, const std::string& re, int* compiled, int* indexable) {
+    RE2 rx(re, RE2::Quiet);
+    if (!rx.ok()) {
+        return;
+    }
+    GramQuery q;
+    ASSERT_TRUE(comp.compile_regexp(re, &q).ok());
+    (*compiled)++;
+    if (!q.is_all()) {
+        (*indexable)++;
+    }
+    for (int r = 0; r < 20; r++) {
+        std::string row = random_row(rng);
+        bool truth = RE2::PartialMatch(row, rx);
+        std::vector<std::string_view> g;
+        ex.extract(row, &g);
+        std::set<std::string> grams(g.begin(), g.end());
+        bool cand = eval(q, grams);
+        ASSERT_TRUE(!truth || cand)
+                << "FALSE NEGATIVE mode=" << (int)mode << " lc=" << lc << " re=" << re
+                << " row=" << row << " q=" << q.to_debug_string();
+    }
+}
+
 } // namespace
 
 // 差分模糊测试：对随机正则与随机行，比较 RE2 的真值判定与「编译出的 GramQuery
@@ -141,26 +154,9 @@ TEST(RegexGramFuzzTest, CompiledQueryIsSuperset) {
             int compiled = 0, indexable = 0;
             for (int it = 0; it < 3000; it++) {
                 std::string re = random_regex(rng, 2);
-                RE2 rx(re, RE2::Quiet);
-                if (!rx.ok()) {
-                    continue;
-                }
-                GramQuery q;
-                ASSERT_TRUE(comp.compile_regexp(re, &q).ok());
-                compiled++;
-                if (!q.is_all()) {
-                    indexable++;
-                }
-                for (int r = 0; r < 20; r++) {
-                    std::string row = random_row(rng);
-                    bool truth = RE2::PartialMatch(row, rx);
-                    std::vector<std::string_view> g;
-                    ex.extract(row, &g);
-                    std::set<std::string> grams(g.begin(), g.end());
-                    bool cand = eval(q, grams);
-                    ASSERT_TRUE(!truth || cand)
-                            << "FALSE NEGATIVE mode=" << (int)mode << " lc=" << lc << " re=" << re
-                            << " row=" << row << " q=" << q.to_debug_string();
+                check_regex(mode, lc, ex, comp, rng, re, &compiled, &indexable);
+                if (::testing::Test::HasFatalFailure()) {
+                    return;
                 }
             }
             // 非致命覆盖率断言，用于防止生成器/编译器退化：至少 1000/3000 条随机
