@@ -67,4 +67,41 @@ TEST(GramQueryTest, SerializeRoundTrip) {
     EXPECT_FALSE(GramQuery::parse("&(", &bad).ok());
 }
 
+TEST(GramQueryTest, ParseRejectsMalformedInput) {
+    // 65 层嵌套的 "&(" 前缀必须在爆栈之前被深度上限拒绝。
+    std::string deep;
+    for (int i = 0; i < 65; i++) {
+        deep += "&(";
+    }
+    GramQuery too_deep;
+    EXPECT_FALSE(GramQuery::parse(deep, &too_deep).ok());
+
+    GramQuery bad;
+    EXPECT_FALSE(GramQuery::parse("&()", &bad).ok());      // 零操作数的 AND
+    EXPECT_FALSE(GramQuery::parse("&(,)", &bad).ok());     // 开头逗号 → 空 item
+    EXPECT_FALSE(GramQuery::parse("&(a,,b)", &bad).ok());  // 连续逗号 → 空 item
+    EXPECT_FALSE(GramQuery::parse("&(YQ==,)", &bad).ok()); // 结尾逗号 → 空 item
+    EXPECT_FALSE(GramQuery::parse("&(@@)", &bad).ok());    // 非法 base64
+    EXPECT_FALSE(GramQuery::parse("*x", &bad).ok());       // 尾随输入
+
+    // 解析失败时 *out 必须保持调用前的值，不能残留半成品树。
+    GramQuery preserved = GramQuery::of_gram("z");
+    EXPECT_FALSE(GramQuery::parse("&()", &preserved).ok());
+    EXPECT_EQ(preserved.to_debug_string(), "(\"z\")");
+}
+
+TEST(GramQueryTest, ParseRebuildsViaCombinators) {
+    // "&(*)" 只有一个操作数 *，按 and_ 组合子折叠：and_(all(), all()) 短路为 all()，
+    // 而不是原样产出一个持有单个 ALL 子查询的 AND 节点。
+    GramQuery all_query;
+    ASSERT_TRUE(GramQuery::parse("&(*)", &all_query).ok());
+    EXPECT_TRUE(all_query.is_all());
+
+    // OR 内已有 gram "a"（YQ==），含 "a" 的子 AND(a,b) 按 or_ 组合子重建时被吸收，
+    // 而不是被原样拼装成一棵 or_() 本不会产出的树。
+    GramQuery absorbed;
+    ASSERT_TRUE(GramQuery::parse("|(YQ==,&(YQ==,Yg==))", &absorbed).ok());
+    EXPECT_EQ(absorbed.to_debug_string(), "(\"a\")");
+}
+
 } // namespace doris::segment_v2::gram

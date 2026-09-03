@@ -63,7 +63,10 @@ struct GramQuery {
     // gram 用 base64 编码以避免与分隔符冲突；items 以 ',' 分隔，子查询按各自
     // serialize() 结果排序后输出，从而保证结构相同则文本相同。
     std::string serialize() const;
-    // serialize() 的逆操作；输入不合法时返回 Status::InvalidArgument。
+    // serialize() 的逆操作：语法必须严格匹配 serialize() 的输出形状（拒绝空
+    // item、空 gram、零操作数的 AND/OR 等宽松写法），解析出的树按 and_/or_
+    // 重新化简以满足不变式；嵌套深度有上限。输入不合法或嵌套过深时返回
+    // Status::InvalidArgument，此时 *out 保持调用前的值不变。
     static Status parse(std::string_view text, GramQuery* out);
     // 可读形式，供 EXPLAIN 使用，例如 "(\"abc\" & (\"de\" | \"fg\"))"。
     std::string to_debug_string() const;

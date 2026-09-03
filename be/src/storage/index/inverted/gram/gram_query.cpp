@@ -243,8 +243,25 @@ std::string GramQuery::serialize() const {
 
 namespace {
 
+// AND/OR 允许嵌套的最大深度（顶层调用为 1）。超过后立即拒绝，避免形如重复
+// "&(" 的畸形/恶意输入递归过深导致爆栈（本仓库有过深递归爆栈先例 CIR-21633）。
+constexpr int kMaxNestingDepth = 64;
+
 // 从 t[i] 起解析一个 GramQuery；解析成功后 i 指向该查询结束后的下一个位置。
-Status parse_at(std::string_view t, size_t& i, GramQuery* out) {
+// depth 为当前嵌套深度（顶层调用为 1），用于限制递归层数，防止爆栈。
+//
+// AND/OR 节点里的每个 item 都通过 GramQuery::and_/or_ 组合子折叠进累加器
+// （AND 从 all() 起、OR 从 none() 起），而不是直接拼装 grams/subs 字段：这样
+// 排序、去重、吸收律、ALL/NONE 短路、单元素退化等不变式自动成立。这些不变式
+// 是 has_gram()（二分查找）与 or_absorb_subsets()（std::includes）正确工作的
+// 前提——任何文本解析出的树都必须先满足它们，才能安全地参与后续 and_/or_
+// 调用；直接拼装字段会产出这些不变式不允许的树，使后续操作静默出错。
+// 同时严格校验语法，拒绝 serialize() 不会产出的宽松写法：空 item（连续逗号/
+// 开头逗号/结尾逗号）、零操作数的 AND/OR（如 "&()"）、解码为空串的 gram。
+Status parse_at(std::string_view t, size_t& i, int depth, GramQuery* out) {
+    if (depth > kMaxNestingDepth) {
+        return Status::InvalidArgument("gram query nesting too deep");
+    }
     if (i >= t.size()) {
         return Status::InvalidArgument("gram query truncated");
     }
@@ -261,35 +278,58 @@ Status parse_at(std::string_view t, size_t& i, GramQuery* out) {
     if ((t[i] != '&' && t[i] != '|') || i + 1 >= t.size() || t[i + 1] != '(') {
         return Status::InvalidArgument("gram query bad token at {}", i);
     }
-    GramQuery q;
-    q.op = t[i] == '&' ? GramQuery::Op::AND : GramQuery::Op::OR;
+    bool is_and = t[i] == '&';
     i += 2;
-    while (i < t.size() && t[i] != ')') {
+    GramQuery acc = is_and ? GramQuery::all() : GramQuery::none();
+    size_t count = 0;
+    while (true) {
+        if (i >= t.size()) {
+            return Status::InvalidArgument("gram query truncated");
+        }
+        if (t[i] == ')') {
+            break;
+        }
+        GramQuery item;
         if (t[i] == '&' || t[i] == '|' || t[i] == '*' || t[i] == '!') {
-            GramQuery sub;
-            RETURN_IF_ERROR(parse_at(t, i, &sub));
-            q.subs.push_back(std::move(sub));
+            RETURN_IF_ERROR(parse_at(t, i, depth + 1, &item));
         } else {
             size_t j = i;
             while (j < t.size() && t[j] != ',' && t[j] != ')') {
                 j++;
             }
+            if (j == i) {
+                return Status::InvalidArgument("gram query empty item at {}", i);
+            }
             std::string dec;
             if (!doris::base64_decode(std::string(t.substr(i, j - i)), &dec)) {
                 return Status::InvalidArgument("gram query bad base64 at {}", i);
             }
-            q.grams.push_back(std::move(dec));
+            if (dec.empty()) {
+                return Status::InvalidArgument("gram query empty gram at {}", i);
+            }
+            item = GramQuery::of_gram(std::move(dec));
             i = j;
         }
+        count++;
+        acc = is_and ? GramQuery::and_(std::move(acc), std::move(item))
+                     : GramQuery::or_(std::move(acc), std::move(item));
         if (i < t.size() && t[i] == ',') {
             i++;
+            if (i < t.size() && t[i] == ')') {
+                return Status::InvalidArgument("gram query trailing comma at {}", i);
+            }
+            continue;
         }
+        break;
     }
     if (i >= t.size() || t[i] != ')') {
         return Status::InvalidArgument("gram query missing ')'");
     }
     i++;
-    *out = std::move(q);
+    if (count == 0) {
+        return Status::InvalidArgument("gram query empty {} group", is_and ? "AND" : "OR");
+    }
+    *out = std::move(acc);
     return Status::OK();
 }
 
@@ -297,10 +337,15 @@ Status parse_at(std::string_view t, size_t& i, GramQuery* out) {
 
 Status GramQuery::parse(std::string_view text, GramQuery* out) {
     size_t i = 0;
-    RETURN_IF_ERROR(parse_at(text, i, out));
+    // 先解析到局部变量：只有整体成功（且没有尾随输入）才写回 *out，避免调用方
+    // 在解析失败时观察到半成品树（例如旧实现里 trailing-input 场景下 *out
+    // 已经被写入了顶层 token 对应的半成品结果）。
+    GramQuery local;
+    RETURN_IF_ERROR(parse_at(text, i, /*depth=*/1, &local));
     if (i != text.size()) {
         return Status::InvalidArgument("gram query trailing input");
     }
+    *out = std::move(local);
     return Status::OK();
 }
 
