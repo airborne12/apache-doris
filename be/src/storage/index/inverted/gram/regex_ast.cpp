@@ -144,6 +144,13 @@ struct Parser {
     char peek() const { return eof() ? 0 : p[i]; }
 
     uint32_t next_cp(std::string* utf8) {
+        if (eof()) {
+            // 防御性兜底：正常调用点在进 next_cp 前都会先确认还有字符可读，这里
+            // 只是不信任调用方、避免 string_view（不保证 NUL 结尾，不同于原型用
+            // 的 std::string）在 i==size() 时被 p[i] 越界读。
+            utf8->clear();
+            return 0;
+        }
         int l = utf8_len((unsigned char)p[i]);
         if (i + l > p.size()) {
             l = 1;
@@ -262,6 +269,15 @@ struct Parser {
 
     // 把类里的一个码点或转义加入 out（大类置 big）。
     void class_escape(std::vector<uint32_t>* out, bool* big) {
+        // 调用方总是先消费了触发转义的 '\\' 再调用本函数；若此时已经 eof，说明
+        // 该 '\\' 是整个 pattern 的最后一个字符，后面没有被转义的字符——与顶层
+        // parse_atom 里 "trailing backslash" 是同一种错误，同样处理：直接报错，
+        // 不再往下走到 default 分支里 next_cp 会再读一次 i（此时 i==p.size()）。
+        if (eof()) {
+            ok = false;
+            err = "trailing backslash";
+            return;
+        }
         char c = peek();
         i++;
         switch (c) {
@@ -423,7 +439,12 @@ struct Parser {
         std::sort(n->cls.begin(), n->cls.end());
         n->cls.erase(std::unique(n->cls.begin(), n->cls.end()), n->cls.end());
         if (n->cls.size() > 4) {
+            // `(?i)` 下大小写展开可能把 ≤4 个原始码点翻倍到 >4 项（如
+            // (?i)[abc] 展开成 6 项），此时退化为大类；big_class=true 时 cls
+            // 必须清空（见头文件 RegexNode 注释的不变式），否则调用方无法仅凭
+            // big_class 判断「是否可枚举」。
             n->big_class = true;
+            n->cls.clear();
         }
         return n;
     }

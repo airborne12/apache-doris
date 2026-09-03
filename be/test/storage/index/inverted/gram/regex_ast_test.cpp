@@ -107,4 +107,45 @@ TEST(RegexAstTest, FlagsAndErrors) {
     EXPECT_EQ(parse_dump("a\\"), "ERR");
 }
 
+// 覆盖修复轮 1 的 Important 1：类内以裸 '\' 结尾（`[a\` / `[a-\`）不得越界读
+// 输入之外的内存。用非 NUL 结尾的 string_view（从更长的缓冲区截出前缀，
+// 而不是像原型那样总传入 NUL 结尾的 std::string）验证解析器只依赖
+// string_view 自身的长度来判断输入结束，不依赖字符串是否 NUL 结尾。
+TEST(RegexAstTest, ClassTrailingBackslashAtEof) {
+    std::string buf1 = "[a\\XYZ";
+    std::string_view view1 = std::string_view(buf1).substr(0, 3); // "[a\"
+    std::unique_ptr<RegexNode> root1;
+    bool icase1 = false;
+    EXPECT_FALSE(parse_regex(view1, &root1, &icase1).ok());
+
+    std::string buf2 = "[a-\\XYZ";
+    std::string_view view2 = std::string_view(buf2).substr(0, 4); // "[a-\"
+    std::unique_ptr<RegexNode> root2;
+    bool icase2 = false;
+    EXPECT_FALSE(parse_regex(view2, &root2, &icase2).ok());
+}
+
+// 覆盖修复轮 1 的 Important 2：big_class=true 时 cls 必须为空（RegexNode
+// 注释的不变式）。(?i) 下小类展开可能把 ≤4 个原始码点翻倍到 >4 项而退化为
+// 大类，此时 cls 也必须被清空；未超过上限时仍应是正常的可枚举小类。
+TEST(RegexAstTest, IcaseClassBigClassInvariant) {
+    std::unique_ptr<RegexNode> root;
+    bool icase = false;
+    ASSERT_TRUE(parse_regex("(?i)[abc]", &root, &icase).ok());
+    ASSERT_EQ(root->kids.size(), 1U);
+    const RegexNode* cls_node = root->kids[0].get();
+    EXPECT_EQ(cls_node->type, RegexNode::Type::CLASS);
+    EXPECT_TRUE(cls_node->big_class);
+    EXPECT_TRUE(cls_node->cls.empty());
+
+    std::unique_ptr<RegexNode> root2;
+    bool icase2 = false;
+    ASSERT_TRUE(parse_regex("(?i)[ab]", &root2, &icase2).ok());
+    ASSERT_EQ(root2->kids.size(), 1U);
+    const RegexNode* cls_node2 = root2->kids[0].get();
+    EXPECT_EQ(cls_node2->type, RegexNode::Type::CLASS);
+    EXPECT_FALSE(cls_node2->big_class);
+    EXPECT_EQ(cls_node2->cls, (std::vector<std::string> {"A", "B", "a", "b"}));
+}
+
 } // namespace doris::segment_v2::gram
