@@ -74,27 +74,30 @@ static inline uint64_t fnv64(const char *s, size_t n) {
 }
 // cdc gram：从边界 b_k 起，延伸到首个使长度 ≥ n 的后续边界 b_j（含其字节对），上限 maxlen；
 // 规则只依赖 b_k 之后的内容（局部性），故查询侧对字面量能复现出与索引侧完全相同的 gram
+// 生产形态的边界判定：65536 项查表（8 KB 位图），每字节对一次查表；gram 哈希直接在原串上算，不拷贝
+static vector<uint8_t> g_bnd_table; static double g_bnd_p = -1;
+static inline bool cdc_boundary_fast(unsigned char a, unsigned char b) { unsigned idx = ((unsigned)a << 8) | b; return g_bnd_table[idx >> 3] >> (idx & 7) & 1; }
 static void grams_of_cdc(string_view s, const Opts &o, vector<uint64_t> &out) {
+  if (g_bnd_p != o.p) { g_bnd_table.assign(8192, 0); for (unsigned idx = 0; idx < 65536; idx++) if (cdc_boundary(idx >> 8, idx & 255, o)) g_bnd_table[idx >> 3] |= 1 << (idx & 7); g_bnd_p = o.p; }
   size_t L = s.size();
   if (L < (size_t)o.n) return;
-  static thread_local vector<char> isb;  // isb[i]：位置 i 与 i+1 的字节对是否为边界
+  static thread_local vector<char> isb;
   isb.assign(L, 0);
+  static const bool keep_text = getenv("BENCH_EXTRACT") == nullptr;
   string tmp;
-  for (size_t i = 0; i + 1 < L; i++) isb[i] = cdc_boundary((unsigned char)s[i], (unsigned char)s[i + 1], o);
+  for (size_t i = 0; i + 1 < L; i++) isb[i] = cdc_boundary_fast((unsigned char)s[i], (unsigned char)s[i + 1]);
   for (size_t k = 0; k + 1 < L; k++) {
     if (!isb[k]) continue;
     size_t end = 0;
     for (size_t j = k + 1; j + 1 < L && j + 2 - k <= (size_t)o.maxlen; j++) {
       if (isb[j] && j + 2 - k >= (size_t)o.n) { end = j + 2; break; }
     }
-    if (end == 0) {
-      if (k + (size_t)o.maxlen <= L) end = k + o.maxlen; else continue;  // 无合适边界：取定长 maxlen 截断 gram（仍是局部规则）
-    }
-    tmp.assign(s.data() + k, end - k);
-    if (o.lower) for (auto &ch : tmp) if (ch >= 'A' && ch <= 'Z') ch = ch - 'A' + 'a';
-    uint64_t h = fnv64(tmp.data(), tmp.size());
+    if (end == 0) { if (k + (size_t)o.maxlen <= L) end = k + o.maxlen; else continue; }
+    uint64_t h;
+    if (o.lower) { tmp.assign(s.data() + k, end - k); for (auto &ch : tmp) if (ch >= 'A' && ch <= 'Z') ch = ch - 'A' + 'a'; h = fnv64(tmp.data(), tmp.size()); }
+    else h = fnv64(s.data() + k, end - k);
     out.push_back(h);
-    if (!g_gram_text.count(h)) g_gram_text.emplace(h, tmp);
+    if (keep_text && !g_gram_text.count(h)) g_gram_text.emplace(h, o.lower ? tmp : string(s.data() + k, end - k));
   }
 }
 
@@ -1874,6 +1877,18 @@ int main(int argc, char **argv) {
       return 0;
     }
     (void)val;
+  }
+  if (getenv("BENCH_EXTRACT")) {  // 只测 gram 提取吞吐：对全部行跑 grams_of 3 轮，丢弃结果
+    Corpus cb = load_corpus(o);
+    vector<uint64_t> g; uint64_t total = 0; double best = 1e18;
+    for (int rep = 0; rep < 3; rep++) {
+      double t0 = now_ms(); total = 0;
+      for (auto &row : cb.rows) { grams_of(row, o, g); total += g.size(); }
+      best = min(best, now_ms() - t0);
+    }
+    printf("extract: rows=%zu bytes=%zu grams=%llu grams/row=%.1f best=%.1f ms => %.1f MB/s, %.0f ns/row, %.1f ns/gram\n",
+           cb.rows.size(), cb.bytes, (unsigned long long)total, (double)total / cb.rows.size(), best, cb.bytes / 1048576.0 / (best / 1000.0), best * 1e6 / cb.rows.size(), best * 1e6 / max<uint64_t>(1, total));
+    return 0;
   }
   if (o.corpus.empty()) {
     fprintf(stderr, "usage: --corpus F [--queries Q] [--field name] [--n 3] "

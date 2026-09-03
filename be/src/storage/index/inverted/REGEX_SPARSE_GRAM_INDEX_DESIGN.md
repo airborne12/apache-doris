@@ -542,7 +542,19 @@ PROPERTIES(
 
 ### 6.6 写入、溢写、合并与 compaction
 
-- 写入：`GramExtractor` 为每行产出 gram 集合并 `Append`；ASCII 快路径用 SIMD 批量算边界哈希（每字节一次 16 位比较），CDC 的 gram 数是稠密的 1/4，写入 CPU 预计低于现有 NGRAM_BF 的码点滑窗。
+- 写入：`GramExtractor` 为每行产出 gram 集合并 `Append`；边界判定用 65536 项位图查表（8 KB，每字节对一次查表），gram 哈希直接在原串上算，不拷贝。
+
+**写入成本估算**（单线程 CPU；提取吞吐为原型实测，posting 侧按本项目 V4 全文索引 DOCS_ONLY 基准折算：textbench english 分词 ≈ 0.42 µs/行、存储层 ≈ 1.5 µs/行、约 10 token/行 → ≈ 0.15 µs/posting，稀有 term 多时取上限 2×）：
+
+| 方案 | 提取实测 | posting/行（去重后） | 估算写入 CPU | 相对 V4 全文索引（同列 DOCS_ONLY） |
+|---|---|---|---|---|
+| 稠密 3-gram（textbench） | 134 ns/行，580 MB/s | 68 | ≈ 10 µs/行，≈ 8 MB/s | ≈ 5× |
+| **稀疏 CDC p=0.25, L=16（textbench）** | 394 ns/行，197 MB/s | 16 | ≈ 2.7–4 µs/行，≈ 20–30 MB/s | **≈ 1.4–2×** |
+| 稀疏 + casefold | 601 ns/行，129 MB/s | 16 | ≈ 2.9–4.2 µs/行 | ≈ 1.5–2.1× |
+| CJK 码点 1-gram（weibo） | 272 ns/行，475 MB/s | 38 | ≈ 5.8 µs/行，≈ 23 MB/s | ≈ 0.9×（V4 unicode 全文 ≈ 6.5 µs/行） |
+| 稠密 3-gram + τ（httplogs 40 B 行） | 72 ns/行，526 MB/s | 37 | ≈ 5.4 µs/行，≈ 7 MB/s | 该列无全文索引对照 |
+
+读法：提取本身很便宜，稀疏方案的写入成本几乎全部来自 posting 条数，因此「稀疏 gram 比稠密少 4× posting」同时也是「写入 CPU 少 4×」；推荐配置下大约是同列 V4 全文索引写入成本的 1.4–2 倍，与 §9.2 B6「stream load 吞吐下降 ≤ 15%」的验收条是否相容，取决于全文索引在该表导入 CPU 中的份额，必须端到端实测而不是推算。内存：稀疏 gram 16 posting/行 × compact 约 3 B，1M 行约 50 MB，在默认 128 MB 溢写预算内不溢写；稠密则 4 倍并触发溢写。词典侧稀疏 gram 的 distinct 数是稠密的 30 倍（47 万 vs 1.6 万），flush 时排序与 front-coding 写出约几十到一百毫秒/段，可忽略。`gram_mode=auto` 的样本暂存 4 MB，延迟一次提取，开销可忽略。可进一步优化：一趟预计算「下一个边界」数组把内层扫描降为 O(L)、行内先去重再 Append 减少 buffer 写入、SIMD 批量查表。
 - 溢写/归并：复用 `SpillManager`/`SegmentMerger`（omit 模式字节直拷）；stop-gram 判定在最终 EmitSegment 时按全段 df 完成，spill 期间不裁。
 - 稀有指纹表（P1）：EmitSegment 时按 df ≤ 2 分流，不进入词典。
 - compaction：沿用 V4「从列数据重建」门控（§2.5）；未来 SNII Tier A/B 的 stitch/remap 对 DOCS_ONLY gram 索引同样适用（无 tf/位置，最简单的情形）。
