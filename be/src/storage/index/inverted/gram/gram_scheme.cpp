@@ -80,7 +80,14 @@ Status GramScheme::from_properties(const std::map<std::string, std::string>& pro
         RETURN_IF_ERROR(parse_permille("stop_gram_df", it->second, 0.0, 1.0, &s.stop_df_permille));
     }
     if (auto it = props.find("lower_case"); it != props.end()) {
-        s.lower_case = (it->second == "true" || it->second == "1");
+        if (it->second == "true" || it->second == "1") {
+            s.lower_case = true;
+        } else if (it->second == "false" || it->second == "0") {
+            s.lower_case = false;
+        } else {
+            return Status::InvalidArgument("gram property lower_case={} must be true|false",
+                                           it->second);
+        }
     }
     if (auto it = props.find("hash_version"); it != props.end()) {
         RETURN_IF_ERROR(parse_uint("hash_version", it->second, 1, 1, &s.hash_version));

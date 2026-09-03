@@ -47,6 +47,18 @@ TEST(GramSchemeTest, ParsesTokenizerProperties) {
     EXPECT_TRUE(s.lower_case);
 }
 
+TEST(GramSchemeTest, LowerCaseAcceptsBooleanSynonyms) {
+    GramScheme s;
+    ASSERT_TRUE(GramScheme::from_properties({{"lower_case", "true"}}, &s).ok());
+    EXPECT_TRUE(s.lower_case);
+    ASSERT_TRUE(GramScheme::from_properties({{"lower_case", "1"}}, &s).ok());
+    EXPECT_TRUE(s.lower_case);
+    ASSERT_TRUE(GramScheme::from_properties({{"lower_case", "false"}}, &s).ok());
+    EXPECT_FALSE(s.lower_case);
+    ASSERT_TRUE(GramScheme::from_properties({{"lower_case", "0"}}, &s).ok());
+    EXPECT_FALSE(s.lower_case);
+}
+
 TEST(GramSchemeTest, RejectsInvalid) {
     GramScheme s;
     EXPECT_FALSE(GramScheme::from_properties({{"mode", "fuzzy"}}, &s).ok());
@@ -55,6 +67,7 @@ TEST(GramSchemeTest, RejectsInvalid) {
     EXPECT_FALSE(GramScheme::from_properties({{"density", "0"}}, &s).ok());
     EXPECT_FALSE(GramScheme::from_properties({{"density", "1.5"}}, &s).ok());
     EXPECT_FALSE(GramScheme::from_properties({{"stop_gram_df", "-1"}}, &s).ok());
+    EXPECT_FALSE(GramScheme::from_properties({{"lower_case", "yes"}}, &s).ok());
 }
 
 } // namespace doris::segment_v2::gram
