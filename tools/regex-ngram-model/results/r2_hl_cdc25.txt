@@ -1,0 +1,58 @@
+# corpus=/mnt/disk1/jiangkai/httplogs/data/documents-171998.json field=request rows=3000000 data_bytes=118483348 avg_row=39.5 n=3 mode=cdc lower=0 drop_df=0.00
+# cdc: p=0.250 maxlen=24 min_len(n)=3
+## gram-df: distinct=5648 postings=33318097 postings_per_byte=0.281 df_p50=15 df_p90=2953 df_p99=57354 df_max=3000000 | posting-share of grams with df/N>0.1: 61.3%, >0.25: 58.0%, >0.5: 43.4%
+## df-buckets (row-level, FOR-128): <=0.1%: grams=5088 mass=3.0% bytes=1.56%data bits/post=15.0 | 0.1-1%: grams=429 mass=12.4% bytes=4.89%data bits/post=11.2 | 1-5%: grams=111 mass=18.4% bytes=5.82%data bits/post=9.0 | 5-10%: grams=8 mass=4.9% bytes=1.24%data bits/post=7.2 | 10-25%: grams=2 mass=3.4% bytes=0.66%data bits/post=5.5 | 25-50%: grams=4 mass=14.6% bytes=2.16%data bits/post=4.2 | >50%: grams=6 mass=43.4% bytes=3.73%data bits/post=2.4 |
+## size row-level: distinct=5648 postings=33318097 roaring=25.71% for128=20.04% vbyte=31.30% dict=0.06% (bits/posting: roaring 7.31, for128 5.70)
+## size two-tier(R=2): fp_table=0.01% dict=0.05% postings=20.04% total=20.09%
+## size block-level B=64: nblocks=46875 distinct_per_block avg=176 max=248 | inverted roaring=5.33% for128=4.06% vbyte=7.10% dict=0.06% | bloom10=8.85%
+## size block-level B=1024: nblocks=2930 distinct_per_block avg=734 max=987 | inverted roaring=1.73% for128=0.72% vbyte=1.83% dict=0.06% | bloom10=2.28%
+
+## queries (times in ms; speedup = t_re2_full / (t_idx + t_verify))
+regex                                        truth    row_cand  spd_row   re2ms   hsms    idxms   verms   ok      | block-level: B: inv_cand/inv_rows/spd  bloom(bpp): cand/rows/spd
+^GET /images/.*\.gif                         1328882  1504206   1.1       210.5   190.5   0.42    189.9   ok      | B64:46875/3000000/0.9x bf10:46875/3000000/1.0x B1024:2930/3000000/0.9x bf10:2930/3000000/1.0x
+    REAL: base=hs 190.5ms  idx+fastverify=0.42+137.5ms  spd_real=1.4x
+    gramq[3]=("es/" & "ages" & " /imag")  io_row=1105.1KB
+/french/competition/                         5510     5510      99.9      243.0   80.5    0.35    2.1     ok      | B64:4928/315392/8.1x bf10:5074/324736/6.5x B1024:2094/2143936/1.3x bf10:2100/2150080/1.3x
+    REAL: base=memmem 105.9ms  idx+fastverify=0.35+0.7ms  spd_real=102.9x
+    gramq[4]=("titi" & "rench" & "ch/co" & "competi")  io_row=487.5KB
+flashed_stage[0-9]                           7250     3000000   1.0       231.4   78.0    0.03    228.8   ok      | B64:46875/3000000/1.0x bf10:46875/3000000/0.9x B1024:2930/3000000/1.0x bf10:2930/3000000/1.0x
+    REAL: base=hs 78.0ms  idx+fastverify=0.03+83.6ms  spd_real=0.9x
+    gramq[0]=ALL  io_row=0.0KB  [UNINDEXABLE->fullscan]
+\.(jpg|jpeg) HTTP                            204202   3000000   1.0       233.9   88.6    0.03    240.2   ok      | B64:46875/3000000/1.0x bf10:46875/3000000/1.0x B1024:2930/3000000/1.0x bf10:2930/3000000/1.0x
+    REAL: base=hs 88.6ms  idx+fastverify=0.03+103.5ms  spd_real=0.9x
+    gramq[1]=(" HTTP")  io_row=0.6KB
+HTTP/1\.0$                                   2541132  2541132   1.1       233.2   207.4   0.16    206.2   ok      | B64:46875/3000000/1.0x bf10:46875/3000000/1.0x B1024:2930/3000000/1.0x bf10:2930/3000000/1.0x
+    REAL: base=hs 207.4ms  idx+fastverify=0.16+186.5ms  spd_real=1.1x
+    gramq[1]=("TP/1.0")  io_row=368.4KB
+/english/(index|venues)                      87605    1214336   2.0       255.6   116.7   0.43    126.0   ok      | B64:46875/3000000/1.0x bf10:46875/3000000/1.0x B1024:2930/3000000/1.0x bf10:2930/3000000/1.0x
+    REAL: base=hs 116.7ms  idx+fastverify=0.43+81.8ms  spd_real=1.4x
+    gramq[3]=("ngli" & "lis" & "/eng")  io_row=1105.1KB
+tck_pkit_fx_[a-z]                            2085     2085      262.0     233.6   76.9    0.09    0.8     ok      | B64:1613/103232/25.9x bf10:1615/103360/18.0x B1024:832/851648/2.5x bf10:832/851648/3.5x
+    REAL: base=hs 76.9ms  idx+fastverify=0.09+0.2ms  spd_real=302.3x
+    gramq[3]=("t_fx" & "pkit_" & "k_pk")  io_row=15.9KB
+stage[12]\.htm                               13959    13959     45.0      245.6   85.9    0.20    5.3     ok      | B64:11797/755008/3.7x bf10:12197/780608/3.2x B1024:2881/2949824/1.0x bf10:2881/2949824/1.0x
+    REAL: base=hs 85.9ms  idx+fastverify=0.20+3.2ms  spd_real=25.0x
+    gramq[3]=("age2.h" | ("e1.h" & "age1"))  io_row=77.1KB
+/images/[0-9]+\.gif                          103228   2546245   1.2       291.3   172.3   0.31    242.6   ok      | B64:46875/3000000/1.1x bf10:46875/3000000/0.8x B1024:2930/3000000/1.1x bf10:2930/3000000/1.0x
+    REAL: base=hs 172.3ms  idx+fastverify=0.31+161.1ms  spd_real=1.1x
+    gramq[2]=("es/" & "ages")  io_row=736.7KB
+^POST                                        13       3000000   0.9       89.8    86.0    0.02    95.5    ok      | B64:46875/3000000/1.0x bf10:46875/3000000/1.0x B1024:2930/3000000/1.0x bf10:2930/3000000/1.0x
+    REAL: base=hs 86.0ms  idx+fastverify=0.02+92.4ms  spd_real=0.9x
+    gramq[0]=ALL  io_row=0.0KB  [UNINDEXABLE->fullscan]
+/(french|english)/frntpage\.htm              13808    13808     38.5      285.9   77.5    2.45    5.0     ok      | B64:11309/723776/3.9x bf10:11309/723776/3.3x B1024:2867/2935488/1.0x bf10:2867/2935488/1.0x
+    REAL: base=hs 77.5ms  idx+fastverify=2.45+2.1ms  spd_real=17.2x
+    gramq[28]=(("rench" | ("ngli" & "lis")) & ("rench" | ("ngli" & "lis" & "/eng")) & (("ngli" & "lis" & "ish/frntp") | ("rench" & "ch/frntp")) & (("tpag" & "ngli" & "lis" & "ish/frntp") | ("rench" & "tpag" & "ch/frntp")) & (("age.h" & "tpag" & "ngli" & "lis" & "ish/frntp") | ("rench" & "age.h" & "tpag" & "ch/frntp")))  io_row=5958.8KB
+nav_(top|bottom)_inet\.html                  36270    112930    8.8       238.1   82.8    0.11    26.9    ok      | B64:36499/2335936/1.2x bf10:36616/2343424/1.2x B1024:2930/3000000/1.0x bf10:2930/3000000/0.9x
+    REAL: base=hs 82.8ms  idx+fastverify=0.11+19.7ms  spd_real=4.2x
+    gramq[1]=("_inet.h")  io_row=219.7KB
+[0-9]{5}\.jpg                                63467    3000000   1.0       396.1   128.0   0.03    396.2   ok      | B64:46875/3000000/1.0x bf10:46875/3000000/1.0x B1024:2930/3000000/1.0x bf10:2930/3000000/1.0x
+    REAL: base=hs 128.0ms  idx+fastverify=0.03+134.6ms  spd_real=1.0x
+    gramq[0]=ALL  io_row=0.0KB  [UNINDEXABLE->fullscan]
+/images/s102[0-9]+\.gif                      234787   2546245   1.1       240.5   154.6   0.31    213.0   ok      | B64:46875/3000000/1.0x bf10:46875/3000000/1.0x B1024:2930/3000000/0.9x bf10:2930/3000000/1.0x
+    REAL: base=hs 154.6ms  idx+fastverify=0.31+145.7ms  spd_real=1.1x
+    gramq[2]=("es/" & "ages")  io_row=736.7KB
+hm_(nbg|bg)\.gif                             0        589       991.5     236.3   88.7    0.03    0.2     ok      | B64:584/37376/69.8x bf10:1633/104512/16.6x B1024:525/537280/5.5x bf10:542/554688/5.2x
+    REAL: base=hs 88.7ms  idx+fastverify=0.03+0.0ms  spd_real=2199.8x
+    gramq[1]=("bg.gi")  io_row=1.5KB
+
+## summary: queries=15 indexable=12 | median speedup: row-level=1.2x hs-vs-re2(no index)=2.7x | REAL(memmem/hs baseline, fast verify): median all=1.4x indexable-only=2.8x | B=64 inverted=1.0x bloom10=1.0x | B=1024 inverted=1.0x bloom10=1.0x

@@ -1,0 +1,19 @@
+Greenland.*Albedo
+\[\[Latin (alphabet|script)\]\]
+https?://[a-z]+\.nasa\.gov
+Cite web
+born [0-9]{4}
+(?i)university of cambridge
+\{\{Infobox (person|settlement)
+ISBN 978-[0-9]
+Nobel Prize in (Physics|Chemistry)
+quantum (mechanics|field theory)
+United States (Senate|House of Representatives)
+population of [0-9,]+ 
+\[\[Category:American (actors|singers)
+football (club|team)
+[0-9]{4}–[0-9]{4}
+World War (I|II)
+(Shakespeare|Marlowe|Jonson)
+carbon dioxide
+Battle of [A-Z][a-z]+

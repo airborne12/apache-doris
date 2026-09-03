@@ -1,0 +1,100 @@
+# corpus=/mnt/disk15/jiangkai/text_bench/textbench_body.txt field= rows=999872 data_bytes=81354686 avg_row=81.4 n=3 mode=cdc lower=0 drop_df=0.00
+# cdc: p=0.200 maxlen=24 min_len(n)=3
+## gram-df: distinct=467854 postings=12169757 postings_per_byte=0.150 df_p50=1 df_p90=4 df_p99=48 df_max=276411 | posting-share of grams with df/N>0.1: 9.0%, >0.25: 2.3%, >0.5: 0.0%
+## df-buckets (row-level, FOR-128): <=0.1%: grams=466898 mass=12.6% bytes=4.65%data bits/post=19.7 | 0.1-1%: grams=712 mass=15.4% bytes=3.33%data bits/post=11.6 | 1-5%: grams=194 mass=38.9% bytes=6.30%data bits/post=8.7 | 5-10%: grams=43 mass=24.1% bytes=3.40%data bits/post=7.5 | 10-25%: grams=6 mass=6.7% bytes=0.81%data bits/post=6.5 | 25-50%: grams=1 mass=2.3% bytes=0.25%data bits/post=5.8 | >50%: grams=0 mass=0.0% bytes=0.00%data bits/post=0.0 |
+## size row-level: distinct=467854 postings=12169757 roaring=39.02% for128=19.01% vbyte=19.20% dict=9.55% (bits/posting: roaring 20.87, for128 10.17)
+## size two-tier(R=2): fp_table=3.63% dict=1.54% postings=16.95% total=22.12%
+## size block-level B=64: nblocks=15623 distinct_per_block avg=358 max=739 | inverted roaring=18.11% for128=5.84% vbyte=7.95% dict=9.55% | bloom10=8.67%
+## size block-level B=1024: nblocks=977 distinct_per_block avg=2114 max=2791 | inverted roaring=12.89% for128=2.70% vbyte=3.10% dict=9.55% | bloom10=3.18%
+
+## queries (times in ms; speedup = t_re2_full / (t_idx + t_verify))
+regex                                        truth    row_cand  spd_row   re2ms   hsms    idxms   verms   ok      | block-level: B: inv_cand/inv_rows/spd  bloom(bpp): cand/rows/spd
+error.*timeout                               0        0         34072.8   116.0   60.8    0.00    0.0     ok      | B64:0/0/28960.3x bf10:108/6912/50.7x B1024:0/0/40440.8x bf10:8/8192/103.5x
+    REAL: base=hs 60.8ms  idx+fastverify=0.00+0.0ms  spd_real=21839.1x
+    gramq[1]=("timeo")  io_row=0.0KB
+rpc error: code = Unavailable                27076    77874     4.3       78.6    32.6    0.17    18.2    ok      | B64:15142/969088/1.0x bf10:15142/969088/1.0x B1024:977/999872/1.0x bf10:977/999872/1.0x
+    REAL: base=memmem 45.9ms  idx+fastverify=0.17+12.4ms  spd_real=3.7x
+    gramq[3]=("or: co" & "cod" & "ode = U")  io_row=371.2KB
+user_id="[0-9a-f]{8}-                        0        16140     12.9      76.1    46.6    0.13    5.7     ok      | B64:9365/599360/1.6x bf10:9411/602304/1.6x B1024:977/999872/1.0x bf10:977/999872/1.0x
+    REAL: base=hs 46.6ms  idx+fastverify=0.13+3.3ms  spd_real=13.6x
+    gramq[2]=("r_i" & "_id")  io_row=154.6KB
+failed to (convert|charge)                   112551   112551    3.8       79.8    36.0    0.23    20.5    ok      | B64:15503/992192/1.0x bf10:15505/992320/0.9x B1024:977/999872/1.0x bf10:977/999872/1.0x
+    REAL: base=hs 36.0ms  idx+fastverify=0.23+28.8ms  spd_real=1.2x
+    gramq[3]=("failed to co" | ("charg" & "failed to ch"))  io_row=314.1KB
+\[PlaceOrder\]                               16140    16140     8.5       66.6    37.4    0.05    7.8     ok      | B64:9365/599360/1.6x bf10:9413/602432/1.5x B1024:977/999872/1.0x bf10:977/999872/1.0x
+    REAL: base=memmem 40.5ms  idx+fastverify=0.05+2.9ms  spd_real=13.6x
+    gramq[1]=("ceOr")  io_row=31.7KB
+10\.68\.[0-9]+\.[0-9]+:[0-9]+                18060    999872    0.9       79.7    50.5    0.01    88.6    ok      | B64:15623/999872/1.0x bf10:15623/999872/0.9x B1024:977/999872/0.9x bf10:977/999872/1.0x
+    REAL: base=hs 50.5ms  idx+fastverify=0.01+53.9ms  spd_real=0.9x
+    gramq[0]=ALL  io_row=0.0KB  [UNINDEXABLE->fullscan]
+code = (Unavailable|Internal|DeadlineExceede 27080    126797    3.7       94.7    42.5    0.08    25.4    ok      | B64:15482/990848/1.0x bf10:15483/990912/1.0x B1024:977/999872/1.1x bf10:977/999872/1.0x
+    REAL: base=hs 42.5ms  idx+fastverify=0.08+22.6ms  spd_real=1.9x
+    gramq[1]=("cod")  io_row=125.2KB
+severity":"(warn|error)"                     0        0         20042.8   77.2    42.0    0.00    0.0     ok      | B64:0/0/16831.7x bf10:283/18112/18.9x B1024:0/0/17909.0x bf10:7/7168/84.0x
+    REAL: base=hs 42.0ms  idx+fastverify=0.00+0.0ms  spd_real=11340.2x
+    gramq[2]=("everity":"warn"" | "everity":"error")  io_row=0.0KB
+opentelemetry-api-1\.[0-9]+\.[0-9]+          10720    10720     33.7      78.1    43.1    0.04    2.3     ok      | B64:1774/113536/7.8x bf10:1879/120256/6.1x B1024:666/681408/1.5x bf10:671/686528/1.4x
+    REAL: base=hs 43.1ms  idx+fastverify=0.04+2.0ms  spd_real=21.4x
+    gramq[1]=("try-api")  io_row=21.1KB
+^\{"message"                                 24758    68762     1.7       25.1    31.1    0.08    14.4    ok      | B64:15088/965632/0.9x bf10:15098/966272/0.8x B1024:977/999872/0.9x bf10:977/999872/0.8x
+    REAL: base=hs 31.1ms  idx+fastverify=0.08+15.2ms  spd_real=2.0x
+    gramq[1]=("essag")  io_row=122.3KB
+Sending Quote: [0-9]+\.[0-9]+                12764    12764     10.4      70.4    45.2    0.04    6.7     ok      | B64:8317/532288/1.8x bf10:8377/536128/1.6x B1024:977/999872/1.0x bf10:977/999872/1.0x
+    REAL: base=hs 45.2ms  idx+fastverify=0.04+5.8ms  spd_real=7.7x
+    gramq[1]=("Sending")  io_row=25.1KB
+cart\.cartstore\.ValkeyCartStore             140510   140510    3.4       86.9    43.0    0.21    25.5    ok      | B64:15526/993664/1.0x bf10:15526/993664/1.0x B1024:977/999872/1.0x bf10:977/999872/1.0x
+    REAL: base=memmem 46.8ms  idx+fastverify=0.21+22.1ms  spd_real=2.1x
+    gramq[3]=("keyCartStor" & "ore.V" & ".Valke")  io_row=373.0KB
+(?i)unavailable                              28039    999872    1.0       190.6   37.0    0.01    190.2   ok      | B64:15623/999872/1.0x bf10:15623/999872/1.0x B1024:977/999872/1.0x bf10:977/999872/1.0x
+    REAL: base=hs 37.0ms  idx+fastverify=0.01+39.9ms  spd_real=0.9x
+    gramq[0]=ALL  io_row=0.0KB  [UNINDEXABLE->fullscan]
+[0-9]{3}-[0-9]{4}                            22299    999872    1.0       194.3   66.7    0.02    195.0   ok      | B64:15623/999872/1.0x bf10:15623/999872/1.0x B1024:977/999872/1.0x bf10:977/999872/1.0x
+    REAL: base=hs 66.7ms  idx+fastverify=0.02+68.4ms  spd_real=1.0x
+    gramq[0]=ALL  io_row=0.0KB  [UNINDEXABLE->fullscan]
+[a-z]+@[a-z]+\.com                           564      999872    1.0       198.9   45.2    0.02    197.3   ok      | B64:15623/999872/1.0x bf10:15623/999872/1.0x B1024:977/999872/1.0x bf10:977/999872/1.0x
+    REAL: base=hs 45.2ms  idx+fastverify=0.02+47.0ms  spd_real=1.0x
+    gramq[0]=ALL  io_row=0.0KB  [UNINDEXABLE->fullscan]
+conn(ection)? re(set|fused)                  27067    999872    1.0       87.9    38.5    0.01    88.3    ok      | B64:15623/999872/1.0x bf10:15623/999872/1.0x B1024:977/999872/1.0x bf10:977/999872/1.0x
+    REAL: base=hs 38.5ms  idx+fastverify=0.01+40.8ms  spd_real=0.9x
+    gramq[0]=ALL  io_row=0.0KB  [UNINDEXABLE->fullscan]
+GET|POST                                     15576    999872    1.0       196.3   45.1    0.01    197.3   ok      | B64:15623/999872/1.0x bf10:15623/999872/1.0x B1024:977/999872/1.0x bf10:977/999872/1.0x
+    REAL: base=hs 45.1ms  idx+fastverify=0.01+49.4ms  spd_real=0.9x
+    gramq[0]=ALL  io_row=0.0KB  [UNINDEXABLE->fullscan]
+trace\.rb:[0-9]+:in                          4288     86018     4.5       84.0    44.6    0.07    18.5    ok      | B64:15297/979008/1.0x bf10:15301/979264/1.0x B1024:977/999872/1.0x bf10:977/999872/1.0x
+    REAL: base=hs 44.6ms  idx+fastverify=0.07+14.4ms  spd_real=3.1x
+    gramq[1]=("trace")  io_row=122.6KB
+desc = error reading from server             24801    24801     7.5       77.8    33.4    0.35    10.0    ok      | B64:10776/689664/1.3x bf10:10776/689664/1.3x B1024:977/999872/1.0x bf10:977/999872/1.0x
+    REAL: base=memmem 47.2ms  idx+fastverify=0.35+6.0ms  spd_real=7.5x
+    gramq[6]=("esc" & "or " & "sc = error" & "r r" & " rea" & "eading")  io_row=439.7KB
+currency: failed to convert currency         27067    27067     7.8       77.2    33.0    0.30    9.6     ok      | B64:11227/718528/1.3x bf10:11227/718528/1.3x B1024:977/999872/1.0x bf10:977/999872/1.0x
+    REAL: base=memmem 45.6ms  idx+fastverify=0.30+5.7ms  spd_real=7.6x
+    gramq[4]=("failed to co" & "convert cu" & "cur" & "urrency: fa")  io_row=343.6KB
+Convert conversion successful                15149    15149     11.9      68.3    33.8    0.12    5.6     ok      | B64:9339/597696/1.6x bf10:9339/597696/1.5x B1024:977/999872/1.0x bf10:977/999872/1.0x
+    REAL: base=memmem 47.1ms  idx+fastverify=0.12+3.1ms  spd_real=14.6x
+    gramq[4]=("n succe" & "sion " & "conversi" & "ces")  io_row=132.6KB
+\[INFO\] Sending Quote                       12764    12764     29.4      150.0   33.9    0.10    5.0     ok      | B64:8317/532288/3.9x bf10:8317/532288/3.9x B1024:977/999872/2.2x bf10:977/999872/2.2x
+    REAL: base=memmem 45.2ms  idx+fastverify=0.10+2.3ms  spd_real=19.1x
+    gramq[2]=("O] Se" & "Sending")  io_row=50.1KB
+transport: Error while dialing               2266     2266      38.0      77.4    35.1    0.23    1.8     ok      | B64:1731/110784/7.7x bf10:1731/110784/3.8x B1024:579/592320/0.8x bf10:579/592320/1.7x
+    REAL: base=memmem 46.5ms  idx+fastverify=0.23+0.3ms  spd_real=86.8x
+    gramq[9]=("r wh" & "or " & "hile d" & "whi" & "trans" & "nspor" & " Error" & "ort: E" & " dialing")  io_row=197.8KB
+context deadline exceeded                    12       12        2418.9    115.1   32.4    0.02    0.0     ok      | B64:12/768/1252.0x bf10:12/768/59.4x B1024:12/12288/111.6x bf10:12/12288/98.4x
+    REAL: base=memmem 42.1ms  idx+fastverify=0.02+0.0ms  spd_real=1647.9x
+    gramq[3]=(" dea" & "eadline exce" & "context d")  io_row=0.3KB
+product_id=[A-Z0-9]{10}                      0        0         2536.8    69.2    40.6    0.03    0.0     ok      | B64:0/0/5695.9x bf10:130/8320/24.1x B1024:0/0/6235.1x bf10:10/10240/60.9x
+    REAL: base=hs 40.6ms  idx+fastverify=0.03+0.0ms  spd_real=1501.4x
+    gramq[2]=("_id" & "oduct_i")  io_row=123.0KB
+quantity=[0-9]+                              49127    96643     3.5       65.7    34.1    0.22    18.4    ok      | B64:15307/979648/1.0x bf10:15307/979648/0.9x B1024:977/999872/1.0x bf10:977/999872/0.9x
+    REAL: base=hs 34.1ms  idx+fastverify=0.22+20.1ms  spd_real=1.7x
+    gramq[3]=("qua" & "uanti" & "tity=")  io_row=369.3KB
+gems/(grpc|opentelemetry)-[a-z]*-?[0-9]      10720    999872    1.0       67.1    46.2    0.02    69.9    ok      | B64:15623/999872/1.0x bf10:15623/999872/1.0x B1024:977/999872/1.0x bf10:977/999872/1.0x
+    REAL: base=hs 46.2ms  idx+fastverify=0.02+50.0ms  spd_real=0.9x
+    gramq[0]=ALL  io_row=0.0KB  [UNINDEXABLE->fullscan]
+Unavailable desc = error                     24802    24802     6.1       64.8    33.3    0.87    9.8     ok      | B64:10776/689664/1.4x bf10:10842/693888/1.0x B1024:977/999872/0.9x bf10:977/999872/1.0x
+    REAL: base=memmem 42.5ms  idx+fastverify=0.87+6.4ms  spd_real=5.8x
+    gramq[3]=("esc" & " des" & "sc = error")  io_row=294.6KB
+(?s)Sending.*Quote                           12764    12764     12.2      66.6    41.5    0.11    5.4     ok      | B64:8317/532288/1.8x bf10:8377/536128/1.7x B1024:977/999872/1.0x bf10:977/999872/1.0x
+    REAL: base=hs 41.5ms  idx+fastverify=0.11+4.0ms  spd_real=10.0x
+    gramq[1]=("Sending")  io_row=25.1KB
+
+## summary: queries=29 indexable=22 | median speedup: row-level=6.1x hs-vs-re2(no index)=2.0x | REAL(memmem/hs baseline, fast verify): median all=5.8x indexable-only=8.9x | B=64 inverted=1.3x bloom10=1.0x | B=1024 inverted=1.0x bloom10=1.0x

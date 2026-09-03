@@ -1,0 +1,70 @@
+# corpus=/mnt/disk15/jiangkai/weibo/weibo_corpus.txt field= rows=500000 data_bytes=67899657 avg_row=135.8 n=6 mode=cdc lower=0 drop_df=0.00
+# cdc: p=0.250 maxlen=24 min_len(n)=6
+## gram-df: distinct=5199665 postings=14294212 postings_per_byte=0.211 df_p50=1 df_p90=3 df_p99=22 df_max=145878 | posting-share of grams with df/N>0.1: 1.0%, >0.25: 1.0%, >0.5: 0.0%
+## df-buckets (row-level, FOR-128): <=0.1%: grams=5197919 mass=81.9% bytes=44.57%data bits/post=20.7 | 0.1-1%: grams=1699 mass=13.6% bytes=4.14%data bits/post=11.6 | 1-5%: grams=46 mass=3.5% bytes=0.77%data bits/post=8.4 | 5-10%: grams=0 mass=0.0% bytes=0.00%data bits/post=0.0 | 10-25%: grams=0 mass=0.0% bytes=0.00%data bits/post=0.0 | 25-50%: grams=1 mass=1.0% bytes=0.12%data bits/post=4.6 | >50%: grams=0 mass=0.0% bytes=0.00%data bits/post=0.0 |
+## size row-level: distinct=5199665 postings=14294212 roaring=189.53% for128=54.02% vbyte=50.57% dict=127.88% (bits/posting: roaring 72.02, for128 20.53)
+## size two-tier(R=2): fp_table=49.67% dict=12.74% postings=26.31% total=88.72%
+## size block-level B=64: nblocks=7813 distinct_per_block avg=1725 max=2975 | inverted roaring=161.82% for128=36.78% vbyte=32.17% dict=127.88% | bloom10=24.86%
+## size block-level B=1024: nblocks=489 distinct_per_block avg=23743 max=28653 | inverted roaring=155.37% for128=26.06% vbyte=23.03% dict=127.88% | bloom10=21.38%
+
+## queries (times in ms; speedup = t_re2_full / (t_idx + t_verify))
+regex                                        truth    row_cand  spd_row   re2ms   hsms    idxms   verms   ok      | block-level: B: inv_cand/inv_rows/spd  bloom(bpp): cand/rows/spd
+三星.*手机                               243      500000    1.2       74.6    36.7    0.01    63.4    ok      | B64:7813/500000/1.2x bf10:7813/500000/1.2x B1024:489/500000/1.2x bf10:489/500000/1.2x
+    REAL: base=hs 36.7ms  idx+fastverify=0.01+38.1ms  spd_real=1.0x
+    gramq[0]=ALL  io_row=0.0KB  [UNINDEXABLE->fullscan]
+(三星|苹果|华为)手机                 233      234       616.3     163.3   46.5    0.04    0.2     ok      | B64:229/14656/35.1x bf10:294/18816/20.0x B1024:182/186368/2.8x bf10:183/187392/2.8x
+    REAL: base=hs 46.5ms  idx+fastverify=0.04+0.0ms  spd_real=709.4x
+    gramq[6]=("星手" | ("��为�" & "�为手") | ("苹果手" & "�果手" & "果手"))  io_row=0.9KB
+手机微博                                 30       30        1312.3    64.5    21.7    0.02    0.0     ok      | B64:30/1920/242.0x bf10:93/5952/36.5x B1024:28/28672/17.6x bf10:31/31744/15.6x
+    REAL: base=memmem 26.2ms  idx+fastverify=0.02+0.0ms  spd_real=1262.0x
+    gramq[1]=("��机微�")  io_row=0.1KB
+http://t\.cn/[A-Za-z0-9]+                    145870   145878    2.3       38.9    30.4    0.05    17.1    ok      | B64:7813/500000/0.9x bf10:7813/500000/0.9x B1024:489/500000/1.0x bf10:489/500000/0.9x
+    REAL: base=hs 30.4ms  idx+fastverify=0.05+17.4ms  spd_real=1.7x
+    gramq[1]=("tp://t.cn")  io_row=64.1KB
+\[心\]                                      4521     500000    0.7       41.3    22.5    0.06    58.3    ok      | B64:7813/500000/1.0x bf10:7813/500000/1.0x B1024:489/500000/1.0x bf10:489/500000/1.0x
+    REAL: base=memmem 30.2ms  idx+fastverify=0.06+31.9ms  spd_real=0.9x
+    gramq[0]=ALL  io_row=0.0KB  [UNINDEXABLE->fullscan]
+投票.*入口                               339      500000    1.0       68.1    28.0    0.01    69.4    ok      | B64:7813/500000/1.0x bf10:7813/500000/1.0x B1024:489/500000/1.0x bf10:489/500000/1.0x
+    REAL: base=hs 28.0ms  idx+fastverify=0.01+28.8ms  spd_real=1.0x
+    gramq[0]=ALL  io_row=0.0KB  [UNINDEXABLE->fullscan]
+德化窑                                    1        500000    0.8       73.2    19.4    0.02    93.3    ok      | B64:7813/500000/0.9x bf10:7813/500000/0.9x B1024:489/500000/1.0x bf10:489/500000/1.0x
+    REAL: base=memmem 24.3ms  idx+fastverify=0.02+31.7ms  spd_real=0.8x
+    gramq[0]=ALL  io_row=0.0KB  [UNINDEXABLE->fullscan]
+分享图片                                 5728     5728      45.1      71.3    21.0    0.02    1.6     ok      | B64:3982/254848/1.9x bf10:4014/256896/1.8x B1024:489/500000/1.0x bf10:489/500000/1.0x
+    REAL: base=memmem 26.1ms  idx+fastverify=0.02+0.4ms  spd_real=56.0x
+    gramq[1]=("享图�")  io_row=11.3KB
+太平公主.*审美                         1        500000    1.0       73.3    32.4    0.02    72.6    ok      | B64:7813/500000/1.0x bf10:7813/500000/1.0x B1024:489/500000/1.0x bf10:489/500000/0.9x
+    REAL: base=hs 32.4ms  idx+fastverify=0.02+33.1ms  spd_real=1.0x
+    gramq[0]=ALL  io_row=0.0KB  [UNINDEXABLE->fullscan]
+[0-9]+元                                    4734     500000    1.1       185.4   36.4    0.01    169.8   ok      | B64:7813/500000/1.1x bf10:7813/500000/1.1x B1024:489/500000/1.1x bf10:489/500000/1.1x
+    REAL: base=hs 36.4ms  idx+fastverify=0.01+45.2ms  spd_real=0.8x
+    gramq[0]=ALL  io_row=0.0KB  [UNINDEXABLE->fullscan]
+iPhone ?[0-9]                                1149     500000    0.9       37.3    19.6    0.01    39.9    ok      | B64:7813/500000/1.0x bf10:7813/500000/1.0x B1024:489/500000/1.0x bf10:489/500000/1.0x
+    REAL: base=hs 19.6ms  idx+fastverify=0.01+19.8ms  spd_real=1.0x
+    gramq[0]=ALL  io_row=0.0KB  [UNINDEXABLE->fullscan]
+哈哈+                                      20318    20318     10.9      75.3    21.6    0.04    6.9     ok      | B64:7196/460512/1.1x bf10:7198/460640/1.0x B1024:489/500000/1.0x bf10:489/500000/1.0x
+    REAL: base=hs 21.6ms  idx+fastverify=0.04+4.2ms  spd_real=5.1x
+    gramq[1]=("哈哈")  io_row=39.8KB
+北京.*上海                               89       500000    1.0       75.0    28.3    0.01    74.6    ok      | B64:7813/500000/1.0x bf10:7813/500000/1.0x B1024:489/500000/1.0x bf10:489/500000/1.0x
+    REAL: base=hs 28.3ms  idx+fastverify=0.01+31.8ms  spd_real=0.9x
+    gramq[0]=ALL  io_row=0.0KB  [UNINDEXABLE->fullscan]
+转发微博                                 419      3278      36.3      58.6    20.4    0.02    1.6     ok      | B64:2151/137664/3.4x bf10:2218/141952/3.1x B1024:440/450560/1.1x bf10:442/452608/1.1x
+    REAL: base=memmem 27.3ms  idx+fastverify=0.02+0.6ms  spd_real=44.2x
+    gramq[1]=("��微�")  io_row=6.5KB
+生日快乐                                 1755     500000    1.0       60.2    20.5    0.01    61.5    ok      | B64:7813/500000/1.0x bf10:7813/500000/1.0x B1024:489/500000/1.0x bf10:489/500000/1.0x
+    REAL: base=memmem 26.1ms  idx+fastverify=0.01+26.8ms  spd_real=1.0x
+    gramq[0]=ALL  io_row=0.0KB  [UNINDEXABLE->fullscan]
+(周杰伦|林俊杰|王力宏)              476      500000    1.4       217.0   32.7    0.01    153.4   ok      | B64:7813/500000/1.2x bf10:7813/500000/1.4x B1024:489/500000/1.4x bf10:489/500000/1.4x
+    REAL: base=hs 32.7ms  idx+fastverify=0.01+32.6ms  spd_real=1.0x
+    gramq[0]=ALL  io_row=0.0KB  [UNINDEXABLE->fullscan]
+新年.*快乐                               560      6000      19.1      67.0    28.3    0.03    3.5     ok      | B64:4210/269408/1.8x bf10:4235/271008/1.7x B1024:489/500000/1.0x bf10:489/500000/1.0x
+    REAL: base=hs 28.3ms  idx+fastverify=0.03+2.0ms  spd_real=14.1x
+    gramq[1]=("新年")  io_row=11.8KB
+支持.*(李|王)                            42       500000    1.0       66.7    26.1    0.01    67.1    ok      | B64:7813/500000/1.0x bf10:7813/500000/1.0x B1024:489/500000/1.0x bf10:489/500000/1.0x
+    REAL: base=hs 26.1ms  idx+fastverify=0.01+27.4ms  spd_real=1.0x
+    gramq[0]=ALL  io_row=0.0KB  [UNINDEXABLE->fullscan]
+[a-zA-Z]+@                                   1051     500000    1.0       152.6   27.8    0.01    156.2   ok      | B64:7813/500000/1.0x bf10:7813/500000/1.0x B1024:489/500000/1.0x bf10:489/500000/1.0x
+    REAL: base=hs 27.8ms  idx+fastverify=0.01+29.3ms  spd_real=0.9x
+    gramq[0]=ALL  io_row=0.0KB  [UNINDEXABLE->fullscan]
+
+## summary: queries=19 indexable=7 | median speedup: row-level=1.1x hs-vs-re2(no index)=2.9x | REAL(memmem/hs baseline, fast verify): median all=1.0x indexable-only=44.2x | B=64 inverted=1.0x bloom10=1.0x | B=1024 inverted=1.0x bloom10=1.0x

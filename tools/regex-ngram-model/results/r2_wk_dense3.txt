@@ -1,0 +1,69 @@
+# corpus=/mnt/disk15/jiangkai/wiki_shards/wiki_corpus.txt field= rows=8000 data_bytes=407728892 avg_row=50966.1 n=3 mode=byte lower=0 drop_df=0.00
+## gram-df: distinct=517405 postings=52673373 postings_per_byte=0.129 df_p50=3 df_p90=68 df_p99=2865 df_max=7972 | posting-share of grams with df/N>0.1: 77.2%, >0.25: 59.0%, >0.5: 36.6%
+## df-buckets (row-level, FOR-128): <=0.1%: grams=369390 mass=1.7% bytes=0.43%data bits/post=15.3 | 0.1-1%: grams=100260 mass=5.0% bytes=0.88%data bits/post=10.8 | 1-5%: grams=26188 mass=8.9% bytes=1.21%data bits/post=8.4 | 5-10%: grams=6638 mass=7.1% bytes=0.80%data bits/post=6.9 | 10-25%: grams=7383 mass=18.1% bytes=1.67%data bits/post=5.7 | 25-50%: grams=4181 mass=22.5% bytes=1.62%data bits/post=4.5 | >50%: grams=3365 mass=36.6% bytes=1.78%data bits/post=3.0 |
+## size row-level: distinct=517405 postings=52673373 roaring=22.95% for128=8.44% vbyte=13.56% dict=1.14% (bits/posting: roaring 14.21, for128 5.23)
+## size two-tier(R=2): fp_table=0.47% dict=0.61% postings=8.23% total=9.32%
+## size block-level B=16: nblocks=500 distinct_per_block avg=32646 max=56902 | inverted roaring=6.48% for128=2.04% vbyte=4.10% dict=1.14% | bloom10=5.00%
+## size block-level B=64: nblocks=125 distinct_per_block avg=64138 max=82369 | inverted roaring=4.14% for128=0.95% vbyte=1.97% dict=1.14% | bloom10=2.46%
+
+## queries (times in ms; speedup = t_re2_full / (t_idx + t_verify))
+regex                                        truth    row_cand  spd_row   re2ms   hsms    idxms   verms   ok      | block-level: B: inv_cand/inv_rows/spd  bloom(bpp): cand/rows/spd
+Greenland.*Albedo                            1        427       6.2       74.1    80.9    0.08    11.8    ok      | B16:489/7824/1.4x bf10:489/7824/1.4x B64:125/8000/1.4x bf10:125/8000/1.4x
+    REAL: base=hs 80.9ms  idx+fastverify=0.08+12.3ms  spd_real=6.5x
+    gramq[11]=("Alb" & "Gre" & "and" & "bed" & "edo" & "een" & "enl" & "lan" & "lbe" & "nla" & "ree")  io_row=47.9KB
+\[\[Latin (alphabet|script)\]\]              83       2110      2.0       79.9    60.8    0.36    39.8    ok      | B16:497/7952/1.0x bf10:497/7952/1.0x B64:125/8000/1.0x bf10:125/8000/0.9x
+    REAL: base=hs 60.8ms  idx+fastverify=0.36+30.0ms  spd_real=2.0x
+    gramq[23]=("Lat" & "[La" & "[[L" & "ati" & "in " & "t]]" & "tin" & ((" al" & "n a") | (" sc" & "n s")) & (("abe" & "alp" & "bet" & "hab" & "lph" & "pha") | ("cri" & "ipt" & "rip" & "scr")) & ("et]" | "pt]"))  io_row=89.2KB
+https?://[a-z]+\.nasa\.gov                   198      421       10.8      221.6   110.9   0.15    20.4    ok      | B16:435/6960/1.1x bf10:435/6960/1.1x B64:125/8000/1.0x bf10:125/8000/1.1x
+    REAL: base=hs 110.9ms  idx+fastverify=0.15+15.2ms  spd_real=7.2x
+    gramq[17]=(".go" & ".na" & "://" & "a.g" & "asa" & "gov" & "nas" & "sa." & (("htt" & "p:/" & "tp:" & "ttp") | ("htt" & "ps:" & "s:/" & "tps" & "ttp")))  io_row=61.8KB
+Cite web                                     5187     6356      1.2       20.0    15.9    0.07    16.4    ok      | B16:499/7984/1.1x bf10:499/7984/1.1x B64:125/8000/1.1x bf10:125/8000/1.1x
+    REAL: base=memmem 34.6ms  idx+fastverify=0.07+28.8ms  spd_real=1.2x
+    gramq[6]=(" we" & "Cit" & "e w" & "ite" & "te " & "web")  io_row=14.0KB
+born [0-9]{4}                                715      4951      1.2       101.6   75.2    0.05    85.2    ok      | B16:499/7984/1.0x bf10:499/7984/1.0x B64:125/8000/1.0x bf10:125/8000/1.0x
+    REAL: base=hs 75.2ms  idx+fastverify=0.05+63.7ms  spd_real=1.2x
+    gramq[3]=("bor" & "orn" & "rn ")  io_row=15.1KB
+(?i)university of cambridge                  190      2965      1.5       782.0   52.2    0.88    516.1   ok      | B16:498/7968/1.0x bf10:498/7968/1.0x B64:125/8000/1.0x bf10:125/8000/1.0x
+    REAL: base=hs 52.2ms  idx+fastverify=0.88+30.8ms  spd_real=1.6x
+    gramq[144]=(("UNI" | "UNi" | "UnI" | "Uni" | "uNI" | "uNi" | "unI" | "uni") & ("NIV" | "NIv" | "NiV" | "Niv" | "nIV" | "nIv" | "niV" | "niv") & ("IVE" | "IVe" | "IvE" | "Ive" | "iVE" | "iVe" | "ivE" | "ive") & ("VER" | "VEr" | "VeR" | "Ver" | "vER" | "vEr" | "veR" | "ver") & ("ERS" | "ERs" | "ErS" | "Ers" | "eRS" | "eRs" | "erS" | "ers") & ("RSI" | "RSi" | "RsI" | "Rsi" | "rSI" | "rSi" | "rsI" | "rsi") & ("SIT" | "SIt" | "SiT" | "Sit" | "sIT" | "sIt" | "siT" | "sit") & ("ITY" | "ITy" | "ItY" | "Ity" | "iTY" | "iTy" | "itY" | "ity") & ("TY " | "Ty " | "tY " | "ty ") & ("Y O" | "Y o" | "y O" | "y o") & (" OF" | " Of" | " oF" | " of") & ("OF " | "Of " | "oF " | "of ") & ("F C" | "F c" | "f C" | "f c") & (" CA" | " Ca" | " cA" | " ca") & ("CAM" | "CAm" | "CaM" | "Cam" | "cAM" | "cAm" | "caM" | "cam") & ("AMB" | "AMb" | "AmB" | "Amb" | "aMB" | "aMb" | "amB" | "amb") & ("MBR" | "MBr" | "MbR" | "Mbr" | "mBR" | "mBr" | "mbR" | "mbr") & ("BRI" | "BRi" | "BrI" | "Bri" | "bRI" | "bRi" | "brI" | "bri") & ("RID" | "RId" | "RiD" | "Rid" | "rID" | "rId" | "riD" | "rid") & ("IDG" | "IDg" | "IdG" | "Idg" | "iDG" | "iDg" | "idG" | "idg") & ("DGE" | "DGe" | "DgE" | "Dge" | "dGE" | "dGe" | "dgE" | "dge"))  io_row=151.8KB
+\{\{Infobox (person|settlement)              517      1798      3.1       51.0    66.2    0.41    16.0    ok      | B16:496/7936/1.0x bf10:496/7936/1.0x B64:125/8000/1.0x bf10:125/8000/1.0x
+    REAL: base=hs 66.2ms  idx+fastverify=0.41+22.9ms  spd_real=2.8x
+    gramq[24]=("Inf" & "box" & "fob" & "nfo" & "obo" & "ox " & "{In" & "{{I" & ((" pe" & "x p") | (" se" & "x s")) & (("ers" & "per" & "rso" & "son") | ("eme" & "ent" & "ett" & "lem" & "men" & "set" & "tle" & "ttl")))  io_row=103.6KB
+ISBN 978-[0-9]                               89       118       41.4      44.0    64.8    0.03    1.0     ok      | B16:113/1808/3.9x bf10:114/1824/3.8x B64:80/5120/1.5x bf10:80/5120/1.5x
+    REAL: base=hs 64.8ms  idx+fastverify=0.03+1.3ms  spd_real=47.5x
+    gramq[7]=(" 97" & "78-" & "978" & "BN " & "ISB" & "N 9" & "SBN")  io_row=29.6KB
+Nobel Prize in (Physics|Chemistry)           254      775       5.0       40.0    60.8    0.47    7.5     ok      | B16:438/7008/1.1x bf10:438/7008/1.1x B64:125/8000/1.0x bf10:125/8000/1.0x
+    REAL: base=hs 60.8ms  idx+fastverify=0.47+11.3ms  spd_real=5.1x
+    gramq[29]=(" Pr" & " in" & "Nob" & "Pri" & "bel" & "e i" & "el " & "in " & "ize" & "l P" & "obe" & "riz" & "ze " & ((" Ch" & "n C") | (" Ph" & "n P")) & (("Phy" & "hys" & "ics" & "sic" & "ysi") | ("Che" & "emi" & "hem" & "ist" & "mis" & "str" & "try")))  io_row=131.8KB
+quantum (mechanics|field theory)             163      1110      3.3       34.9    63.1    0.46    10.3    ok      | B16:493/7888/1.0x bf10:493/7888/1.0x B64:125/8000/1.0x bf10:125/8000/1.0x
+    REAL: base=hs 63.1ms  idx+fastverify=0.46+18.4ms  spd_real=3.3x
+    gramq[27]=("ant" & "ntu" & "qua" & "tum" & "uan" & "um " & ((" fi" & "m f") | (" me" & "m m")) & (("ani" & "cha" & "ech" & "han" & "ics" & "mec" & "nic") | (" th" & "d t" & "eld" & "eor" & "fie" & "heo" & "iel" & "ld " & "ory" & "the")))  io_row=109.3KB
+United States (Senate|House of Representativ 267      2655      1.6       36.3    76.8    0.55    22.1    ok      | B16:499/7984/1.0x bf10:499/7984/1.0x B64:125/8000/1.0x bf10:125/8000/1.0x
+    REAL: base=hs 76.8ms  idx+fastverify=0.55+48.3ms  spd_real=1.6x
+    gramq[42]=(" St" & "Sta" & "Uni" & "ate" & "d S" & "ed " & "es " & "ite" & "nit" & "tat" & "ted" & "tes" & ((" Ho" & "s H") | (" Se" & "s S")) & (("Sen" & "ate" & "ena" & "nat") | (" Re" & " of" & "Hou" & "Rep" & "ati" & "e o" & "ent" & "epr" & "ese" & "f R" & "ive" & "nta" & "of " & "ous" & "pre" & "res" & "se " & "sen" & "tat" & "tiv" & "use" & "ves")))  io_row=120.3KB
+population of [0-9,]+                        238      4412      1.3       125.5   77.4    0.12    97.5    ok      | B16:498/7968/1.0x bf10:498/7968/1.0x B64:125/8000/1.0x bf10:125/8000/1.0x
+    REAL: base=hs 77.4ms  idx+fastverify=0.12+61.1ms  spd_real=1.3x
+    gramq[12]=(" of" & "ati" & "ion" & "lat" & "n o" & "of " & "on " & "opu" & "pop" & "pul" & "tio" & "ula")  io_row=28.1KB
+\[\[Category:American (actors|singers)       4        790       6.8       81.2    67.2    0.31    11.7    ok      | B16:401/6416/1.2x bf10:402/6432/1.1x B64:125/8000/1.0x bf10:125/8000/1.0x
+    REAL: base=hs 67.2ms  idx+fastverify=0.31+10.0ms  spd_real=6.5x
+    gramq[31]=(":Am" & "Ame" & "Cat" & "[Ca" & "[[C" & "an " & "ate" & "can" & "ego" & "eri" & "gor" & "ica" & "mer" & "ory" & "ric" & "ry:" & "teg" & "y:A" & ((" ac" & "n a") | (" si" & "n s")) & (("act" & "cto" & "ors" & "tor") | ("ers" & "ger" & "ing" & "nge" & "sin")))  io_row=67.7KB
+football (club|team)                         337      787       6.5       128.3   60.0    0.26    19.4    ok      | B16:416/6656/1.2x bf10:416/6656/1.1x B64:125/8000/1.0x bf10:125/8000/1.0x
+    REAL: base=hs 60.0ms  idx+fastverify=0.26+9.6ms  spd_real=6.1x
+    gramq[15]=("all" & "bal" & "foo" & "ll " & "oot" & "otb" & "tba" & ((" cl" & "clu" & "l c" & "lub") | (" te" & "eam" & "l t" & "tea")))  io_row=64.9KB
+[0-9]{4}–[0-9]{4}                          5096     7124      1.0       237.0   29.2    0.01    226.4   ok      | B16:499/7984/1.0x bf10:499/7984/1.0x B64:125/8000/1.0x bf10:125/8000/1.0x
+    REAL: base=hs 29.2ms  idx+fastverify=0.01+27.9ms  spd_real=1.0x
+    gramq[1]=("–")  io_row=2.8KB
+World War (I|II)                             1830     2692      2.3       29.1    42.7    0.19    12.4    ok      | B16:498/7968/1.1x bf10:498/7968/1.0x B64:125/8000/1.0x bf10:125/8000/1.1x
+    REAL: base=hs 42.7ms  idx+fastverify=0.19+19.3ms  spd_real=2.2x
+    gramq[9]=(" Wa" & "War" & "Wor" & "ar " & "d W" & "ld " & "orl" & "r I" & "rld")  io_row=48.3KB
+(Shakespeare|Marlowe|Jonson)                 361      3623      1.4       770.5   74.5    0.27    568.7   ok      | B16:498/7968/1.0x bf10:498/7968/1.0x B64:125/8000/1.0x bf10:125/8000/1.0x
+    REAL: base=hs 74.5ms  idx+fastverify=0.27+54.8ms  spd_real=1.4x
+    gramq[18]=(("Sha" & "ake" & "are" & "ear" & "esp" & "hak" & "kes" & "pea" & "spe") | ("Mar" & "arl" & "low" & "owe" & "rlo") | ("Jon" & "nso" & "ons" & "son"))  io_row=74.6KB
+carbon dioxide                               231      320       21.9      171.9   50.8    0.08    7.8     ok      | B16:242/3872/2.0x bf10:243/3888/2.0x B64:114/7296/1.1x bf10:114/7296/1.1x
+    REAL: base=memmem 79.2ms  idx+fastverify=0.08+3.5ms  spd_real=22.1x
+    gramq[12]=(" di" & "arb" & "bon" & "car" & "dio" & "ide" & "iox" & "n d" & "on " & "oxi" & "rbo" & "xid")  io_row=48.9KB
+Battle of [A-Z][a-z]+                        1089     2379      2.3       38.8    42.4    0.09    16.4    ok      | B16:495/7920/1.0x bf10:495/7920/1.0x B64:125/8000/1.0x bf10:125/8000/1.0x
+    REAL: base=hs 42.4ms  idx+fastverify=0.09+18.3ms  spd_real=2.3x
+    gramq[8]=(" of" & "Bat" & "att" & "e o" & "le " & "of " & "tle" & "ttl")  io_row=19.3KB
+
+## summary: queries=19 indexable=19 | median speedup: row-level=2.3x hs-vs-re2(no index)=1.3x | REAL(memmem/hs baseline, fast verify): median all=2.3x indexable-only=2.3x | B=16 inverted=1.0x bloom10=1.0x | B=64 inverted=1.0x bloom10=1.0x

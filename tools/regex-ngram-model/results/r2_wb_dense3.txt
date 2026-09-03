@@ -1,0 +1,69 @@
+# corpus=/mnt/disk15/jiangkai/weibo/weibo_corpus.txt field= rows=500000 data_bytes=67899657 avg_row=135.8 n=3 mode=byte lower=0 drop_df=0.00
+## gram-df: distinct=490297 postings=56996045 postings_per_byte=0.839 df_p50=2 df_p90=52 df_p99=2013 df_max=274966 | posting-share of grams with df/N>0.1: 13.1%, >0.25: 6.5%, >0.5: 1.0%
+## df-buckets (row-level, FOR-128): <=0.1%: grams=475376 mass=14.2% bytes=23.08%data bits/post=15.5 | 0.1-1%: grams=12971 mass=33.5% bytes=39.01%data bits/post=11.1 | 1-5%: grams=1708 mass=29.6% bytes=26.35%data bits/post=8.5 | 5-10%: grams=165 mass=9.6% bytes=6.89%data bits/post=6.8 | 10-25%: grams=54 mass=6.5% bytes=3.92%data bits/post=5.7 | 25-50%: grams=21 mass=5.6% bytes=2.65%data bits/post=4.5 | >50%: grams=2 mass=1.0% bytes=0.35%data bits/post=3.5 |
+## size row-level: distinct=490297 postings=56996045 roaring=175.13% for128=102.58% vbyte=115.62% dict=6.50% (bits/posting: roaring 16.69, for128 9.78)
+## size two-tier(R=2): fp_table=3.13% dict=2.95% postings=100.80% total=106.88%
+## size block-level B=64: nblocks=7813 distinct_per_block avg=4487 max=6425 | inverted roaring=98.78% for128=35.48% vbyte=54.59% dict=6.50% | bloom10=64.58%
+## size block-level B=1024: nblocks=489 distinct_per_block avg=26338 max=29081 | inverted roaring=34.39% for128=9.88% vbyte=19.51% dict=6.50% | bloom10=23.71%
+
+## queries (times in ms; speedup = t_re2_full / (t_idx + t_verify))
+regex                                        truth    row_cand  spd_row   re2ms   hsms    idxms   verms   ok      | block-level: B: inv_cand/inv_rows/spd  bloom(bpp): cand/rows/spd
+ä¸‰æ˜Ÿ.*æ‰‹æœº                               243      258       212.3     84.9    36.5    0.17    0.2     ok      | B64:1026/65664/8.5x bf10:1046/66944/7.0x B1024:488/498976/1.4x bf10:488/498976/1.4x
+    REAL: base=hs 36.5ms  idx+fastverify=0.17+0.1ms  spd_real=159.6x
+    gramq[8]=("‰‹æ" & "‰æ˜" & "‹æœ" & "¸‰æ" & "ä¸‰" & "æ‰‹" & "æ˜Ÿ" & "æœº")  io_row=248.0KB
+(ä¸‰æ˜Ÿ|è‹¹æžœ|åŽä¸º)æ‰‹æœº                 233      236       243.0     151.4   29.5    0.39    0.2     ok      | B64:964/61696/7.3x bf10:988/63232/6.1x B1024:489/500000/1.0x bf10:489/500000/1.0x
+    REAL: base=hs 29.5ms  idx+fastverify=0.39+0.0ms  spd_real=71.7x
+    gramq[24]=("‰‹æ" & "‹æœ" & "æœº" & (("‰æ˜" & "¸‰æ" & "ä¸‰" & "æ˜Ÿ") | ("‹¹æ" & "¹æž" & "æžœ" & "è‹¹") | ("Žä" & "Žä¸" & "ä¸º" & "åŽ")) & (("˜Ÿæ" & "Ÿæ‰" & "æ‰‹") | ("œæ‰" & "žœæ" & "æ‰‹") | ("¸ºæ" & "ºæ‰" & "æ‰‹")))  io_row=562.3KB
+æ‰‹æœºå¾®åš                                 30       33        298.3     63.1    19.8    0.18    0.0     ok      | B64:1047/67008/6.3x bf10:1080/69120/4.9x B1024:485/495904/1.0x bf10:485/495904/1.0x
+    REAL: base=memmem 25.4ms  idx+fastverify=0.18+0.0ms  spd_real=135.8x
+    gramq[10]=("‰‹æ" & "‹æœ" & "œºå" & "®å" & "ºå¾" & "¾®å" & "åš" & "å¾®" & "æ‰‹" & "æœº")  io_row=423.5KB
+http://t\.cn/[A-Za-z0-9]+                    145870   145875    2.2       38.3    29.9    0.22    17.1    ok      | B64:7813/500000/0.9x bf10:7813/500000/0.8x B1024:489/500000/0.9x bf10:489/500000/1.0x
+    REAL: base=hs 29.9ms  idx+fastverify=0.22+16.4ms  spd_real=1.8x
+    gramq[10]=(".cn" & "//t" & "/t." & "://" & "cn/" & "htt" & "p:/" & "t.c" & "tp:" & "ttp")  io_row=640.7KB
+\[å¿ƒ\]                                      4521     4523      23.0      39.3    21.1    0.10    1.6     ok      | B64:3385/216608/2.2x bf10:3397/217376/1.9x B1024:489/500000/1.0x bf10:489/500000/1.0x
+    REAL: base=memmem 29.3ms  idx+fastverify=0.10+0.8ms  spd_real=32.1x
+    gramq[3]=("[å¿" & "¿ƒ]" & "å¿ƒ")  io_row=93.3KB
+æŠ•ç¥¨.*å…¥å£                               339      339       157.0     66.3    28.0    0.11    0.3     ok      | B64:853/54592/7.5x bf10:869/55616/6.2x B1024:487/498688/1.0x bf10:487/498688/1.0x
+    REAL: base=hs 28.0ms  idx+fastverify=0.11+0.1ms  spd_real=156.8x
+    gramq[8]=("…¥å" & "Š•ç" & "•ç¥" & "¥å" & "å…¥" & "å£" & "æŠ•" & "ç¥¨")  io_row=140.4KB
+å¾·åŒ–çª‘                                    1        1         1164.7    72.8    19.5    0.06    0.0     ok      | B64:1/64/302.1x bf10:1/64/61.2x B1024:8/8192/54.1x bf10:8/8192/51.3x
+    REAL: base=memmem 24.1ms  idx+fastverify=0.06+0.0ms  spd_real=425.3x
+    gramq[7]=("Œ–ç" & "–çª" & "·åŒ" & "¾·å" & "åŒ–" & "å¾·" & "çª‘")  io_row=37.9KB
+åˆ†äº«å›¾ç‰‡                                 5728     5729      31.8      70.2    20.0    0.25    2.0     ok      | B64:4015/256960/1.8x bf10:4017/257088/1.5x B1024:489/500000/1.0x bf10:489/500000/1.0x
+    REAL: base=memmem 25.9ms  idx+fastverify=0.25+0.5ms  spd_real=34.4x
+    gramq[10]=("†äº" & "ˆ†ä" & "›¾ç" & "«å›" & "º«å" & "¾ç‰" & "äº«" & "åˆ†" & "å›¾" & "ç‰‡")  io_row=371.8KB
+å¤ªå¹³å…¬ä¸».*å®¡ç¾Ž                         1        1         502.2     71.0    32.0    0.13    0.0     ok      | B64:1/64/60.8x bf10:1/64/55.8x B1024:140/143360/3.4x bf10:140/143360/3.3x
+    REAL: base=hs 32.0ms  idx+fastverify=0.13+0.0ms  spd_real=227.5x
+    gramq[14]=("…¬ä" & "¡ç¾" & "¤ªå" & "ªå¹" & "¬ä¸" & "®¡ç" & "³å…" & "¹³å" & "ä¸»" & "å…¬" & "å¤ª" & "å®¡" & "å¹³" & "ç¾Ž")  io_row=270.2KB
+[0-9]+å…ƒ                                    4734     8141      25.9      152.7   31.9    0.02    5.9     ok      | B64:4897/313408/1.6x bf10:4935/315840/1.5x B1024:488/499712/1.0x bf10:488/499712/1.0x
+    REAL: base=hs 31.9ms  idx+fastverify=0.02+3.3ms  spd_real=9.8x
+    gramq[1]=("å…ƒ")  io_row=16.0KB
+iPhone ?[0-9]                                1149     2290      41.6      57.3    28.2    0.07    1.3     ok      | B64:1968/125952/3.7x bf10:1968/125952/3.2x B1024:484/495616/1.0x bf10:484/495616/1.0x
+    REAL: base=hs 28.2ms  idx+fastverify=0.07+0.7ms  spd_real=37.1x
+    gramq[4]=("Pho" & "hon" & "iPh" & "one")  io_row=25.2KB
+å“ˆå“ˆ+                                      20318    20345     10.7      89.2    21.6    0.10    8.2     ok      | B64:7205/461088/1.3x bf10:7205/461088/1.2x B1024:489/500000/1.2x bf10:489/500000/1.2x
+    REAL: base=hs 21.6ms  idx+fastverify=0.10+5.4ms  spd_real=3.9x
+    gramq[3]=("ˆå“" & "“ˆå" & "å“ˆ")  io_row=132.3KB
+åŒ—äº¬.*ä¸Šæµ·                               89       136       269.5     73.8    28.2    0.15    0.1     ok      | B64:815/52160/8.1x bf10:821/52544/7.0x B1024:486/496928/1.0x bf10:486/496928/1.0x
+    REAL: base=hs 28.2ms  idx+fastverify=0.15+0.0ms  spd_real=142.7x
+    gramq[8]=("Šæµ" & "Œ—ä" & "—äº" & "¸Šæ" & "ä¸Š" & "äº¬" & "åŒ—" & "æµ·")  io_row=205.3KB
+è½¬å‘å¾®åš                                 419      426       131.3     58.3    20.3    0.18    0.3     ok      | B64:1646/105344/4.2x bf10:1663/106432/3.5x B1024:489/500000/1.0x bf10:489/500000/0.8x
+    REAL: base=memmem 27.2ms  idx+fastverify=0.18+0.0ms  spd_real=132.9x
+    gramq[10]=("‘å" & "‘å¾" & "¬å" & "®å" & "½¬å" & "¾®å" & "åš" & "å‘" & "å¾®" & "è½¬")  io_row=399.0KB
+ç”Ÿæ—¥å¿«ä¹                                 1755     1763      53.2      59.2    19.8    0.21    0.9     ok      | B64:1814/116096/3.7x bf10:1824/116736/3.2x B1024:487/498688/1.0x bf10:487/498688/1.0x
+    REAL: base=memmem 25.2ms  idx+fastverify=0.21+0.2ms  spd_real=68.2x
+    gramq[10]=("”Ÿæ" & "—¥å" & "Ÿæ—" & "¥å¿" & "«ä¹" & "¿«ä" & "ä¹" & "å¿«" & "æ—¥" & "ç”Ÿ")  io_row=351.4KB
+(å‘¨æ°ä¼¦|æž—ä¿Šæ°|çŽ‹åŠ›å®)              476      476       302.8     151.4   32.0    0.18    0.3     ok      | B64:476/30464/14.8x bf10:477/30528/11.6x B1024:438/448512/1.1x bf10:439/449536/1.1x
+    REAL: base=hs 32.0ms  idx+fastverify=0.18+0.1ms  spd_real=131.4x
+    gramq[21]=(("‘¨æ" & "°ä" & "¨æ" & "°ä¼" & "ä¼¦" & "å‘¨" & "æ°") | ("Šæ" & "—ä¿" & "ž—ä" & "¿Šæ" & "ä¿Š" & "æ°" & "æž—") | ("Š›å" & "‹åŠ" & "Ž‹å" & "›å®" & "åŠ›" & "å®" & "çŽ‹"))  io_row=174.5KB
+æ–°å¹´.*å¿«ä¹                               560      618       104.3     64.8    29.0    0.20    0.4     ok      | B64:3199/204704/2.3x bf10:3208/205280/2.1x B1024:489/500000/0.9x bf10:489/500000/1.0x
+    REAL: base=hs 29.0ms  idx+fastverify=0.20+0.1ms  spd_real=87.7x
+    gramq[8]=("–°å" & "«ä¹" & "°å¹" & "¿«ä" & "ä¹" & "å¹´" & "å¿«" & "æ–°")  io_row=312.3KB
+æ”¯æŒ.*(æŽ|çŽ‹)                            42       104       343.9     64.9    26.2    0.10    0.1     ok      | B64:2186/139904/3.3x bf10:2196/140544/0.8x B1024:489/500000/0.7x bf10:489/500000/1.0x
+    REAL: base=hs 26.2ms  idx+fastverify=0.10+0.0ms  spd_real=200.2x
+    gramq[6]=("”¯æ" & "¯æŒ" & "æŒ" & "æ”¯" & ("æŽ" | "çŽ‹"))  io_row=73.2KB
+[a-zA-Z]+@                                   1051     500000    1.0       153.0   27.7    0.01    153.4   ok      | B64:7813/500000/1.0x bf10:7813/500000/1.0x B1024:489/500000/1.0x bf10:489/500000/1.0x
+    REAL: base=hs 27.7ms  idx+fastverify=0.01+29.6ms  spd_real=0.9x
+    gramq[0]=ALL  io_row=0.0KB  [UNINDEXABLE->fullscan]
+
+## summary: queries=19 indexable=18 | median speedup: row-level=131.3x hs-vs-re2(no index)=2.9x | REAL(memmem/hs baseline, fast verify): median all=87.7x indexable-only=109.6x | B=64 inverted=3.7x bloom10=3.2x | B=1024 inverted=1.0x bloom10=1.0x

@@ -1,0 +1,29 @@
+error.*timeout
+rpc error: code = Unavailable
+user_id="[0-9a-f]{8}-
+failed to (convert|charge)
+\[PlaceOrder\]
+10\.68\.[0-9]+\.[0-9]+:[0-9]+
+code = (Unavailable|Internal|DeadlineExceeded)
+severity":"(warn|error)"
+opentelemetry-api-1\.[0-9]+\.[0-9]+
+^\{"message"
+Sending Quote: [0-9]+\.[0-9]+
+cart\.cartstore\.ValkeyCartStore
+(?i)unavailable
+[0-9]{3}-[0-9]{4}
+[a-z]+@[a-z]+\.com
+conn(ection)? re(set|fused)
+GET|POST
+trace\.rb:[0-9]+:in
+desc = error reading from server
+currency: failed to convert currency
+Convert conversion successful
+\[INFO\] Sending Quote
+transport: Error while dialing
+context deadline exceeded
+product_id=[A-Z0-9]{10}
+quantity=[0-9]+
+gems/(grpc|opentelemetry)-[a-z]*-?[0-9]
+Unavailable desc = error
+(?s)Sending.*Quote

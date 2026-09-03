@@ -1,0 +1,15 @@
+^GET /images/.*\.gif
+/french/competition/
+flashed_stage[0-9]
+\.(jpg|jpeg) HTTP
+HTTP/1\.0$
+/english/(index|venues)
+tck_pkit_fx_[a-z]
+stage[12]\.htm
+/images/[0-9]+\.gif
+^POST 
+/(french|english)/frntpage\.htm
+nav_(top|bottom)_inet\.html
+[0-9]{5}\.jpg
+/images/s102[0-9]+\.gif
+hm_(nbg|bg)\.gif
