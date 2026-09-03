@@ -111,6 +111,20 @@
 **结论**：走「INVERTED 索引 + 新内置 gram parser + V4 DOCS_ONLY」路线，写入/溢写/归并/内联/PFOR/compaction 全部复用，改动面集中在 **gram 切分器、正则编译器、查询执行与近似语义、S3 布局** 四处。
 
 
+### 2.6 master 命名对照（实施计划以 master 为准）
+
+本文 §2.5 与 §6 基于 `spimi-optimize` 分支写作，称存储格式为「V4 / SPIMI」。master 上同一格式的名字是 **SNII**（`InvertedIndexStorageFormatPB { V1=0; V2=1; V3=2; SNII=3 }`，`gensrc/proto/olap_file.proto:474-479`），代码在 `be/src/storage/index/snii/`。对照：
+
+| 本文名称 | master 名称 |
+|---|---|
+| V4 / SPIMI 存储格式 | `SNII` |
+| `SpimiPostingBuffer::Append(term, doc_id, position)` | `SpimiTermBuffer::add_token(term, docid, pos, retain_positions)`（`snii/writer/spimi_term_buffer.h:234`） |
+| `SpimiIndexWriter` / `InvertedIndexColumnWriter` V4 分支 | `SniiIndexColumnWriter`（`snii/snii_index_writer.h:46-143`），docs-only 由 `support_phrase` 决定（`.cpp:74-77`） |
+| `SpimiFulltextIndexReader` / `SpimiQueryExecutor::match_all/match_any/add_term_docs` | `SniiIndexReader::execute_snii_query`（`snii_index_reader.cpp:348-433`）+ `snii::query::term_query/boolean_and/boolean_or`（`snii/query/*.h`）+ `LogicalIndexReader::lookup`（`snii/reader/logical_index_reader.h:106`） |
+| `docFreq` | `LogicalIndexReader::lookup` 返回的 `DictEntry.df` |
+| 段级元数据 `.fnm`/`segments_N` | `SniiCoreMetadataPB`（`gensrc/proto/snii.proto:76-82`，只追加字段） |
+| tokenizer 目录 `analysis/tokenizer/` | `be/src/storage/index/inverted/tokenizer/` |
+
 ## 3. 业界产品与学术前沿调研
 
 > 本章由两路调研代理（产品线 / 论文线）在 2026-09 用一手文档、源码、官方博客与论文原文交叉核对得出；每条结论附来源，未核实处注明。完整报告见附录 C。
@@ -411,7 +425,7 @@ textbench，稠密 3-gram 行级，REAL 口径（候选数 ≈ 真值数，说�
 产品层原则（奥卡姆剃刀）：Doris 里已经有两处 n-gram——索引策略框架的内置 tokenizer `ngram`/`edge_ngram`，以及 `NGRAM_BF` 索引。本方案**不引入第三个**：不新增索引类型（不做 `USING NGRAM`），不新增 tokenizer 类型，也**不动 `parser`**——`parser` 的取值是内置语言 analyzer（none/standard/unicode/english/chinese/icu/basic/ik/kuromoji，`IndexPolicy.BUILTIN_ANALYZERS`），n-gram 不属于这一族。用户面只有一句话：**n-gram 是 INVERTED 索引的一种分词方式，用什么函数查决定它怎么用。**
 
 - 索引类型：仍是 `INVERTED`。
-- 分词：全部走现有索引策略框架。内置 tokenizer `ngram`（`IndexPolicy.BUILTIN_TOKENIZERS`）新增参数 `mode`（auto | sparse | dense）、`density`、`stop_gram_df`；`min_gram`/`max_gram` 沿用原名，稀疏模式下即 n 与 L。策略是集群级对象，定义一次、多表复用。
+- 分词：全部走现有索引策略框架。内置 tokenizer `ngram`（`IndexPolicy.BUILTIN_TOKENIZERS`）新增参数 `mode`（auto | sparse | dense）、`density`、`stop_gram_df`、`lower_case`；`min_gram`/`max_gram` 沿用原名，稀疏模式下即 n 与 L。策略是集群级对象，定义一次、多表复用。
 - 查询：`MATCH_*` 在该索引上保持 token 语义（今天已如此）；`LIKE / REGEXP / RLIKE` 新增能力：只要列上的 INVERTED 索引的 analyzer 以 `ngram` tokenizer 为分词器，就自动编译为 gram 查询走索引，建了即生效，不依赖 `enable_function_pushdown`。
 - `NGRAM_BF`：标记为 legacy，文档引导迁移，不再演进；同一列同时存在时 `LIKE` 优先走 INVERTED。
 
@@ -423,9 +437,10 @@ CREATE INVERTED INDEX ANALYZER  gram_auto PROPERTIES("tokenizer" = "gram_auto");
 -- 建索引：与任何自定义 analyzer 的 INVERTED 索引完全相同
 CREATE INDEX idx_msg ON logs(message) USING INVERTED PROPERTIES("analyzer" = "gram_auto");
 
--- 大小写不敏感：沿用 INVERTED 既有属性（gram 族下在提取前折叠，见下）
-CREATE INDEX idx_msg ON logs(message) USING INVERTED
-PROPERTIES("analyzer" = "gram_auto", "lower_case" = "true");
+-- 大小写不敏感：折叠开关放在 TOKENIZER 属性上（索引级 lower_case 对自定义 analyzer 不生效；折叠必须先于边界哈希）
+CREATE INVERTED INDEX TOKENIZER gram_auto_lc PROPERTIES("type" = "ngram", "mode" = "auto", "lower_case" = "true");
+CREATE INVERTED INDEX ANALYZER  gram_auto_lc PROPERTIES("tokenizer" = "gram_auto_lc");
+CREATE INDEX idx_msg ON logs(message) USING INVERTED PROPERTIES("analyzer" = "gram_auto_lc");
 
 -- 需要调参：同一 tokenizer 上的专家参数
 CREATE INVERTED INDEX TOKENIZER gram_log PROPERTIES(
@@ -436,7 +451,7 @@ CREATE INVERTED INDEX TOKENIZER gram_log PROPERTIES(
 
 兼容性：内置 `ngram` tokenizer 的默认行为（`min_gram=1`、`max_gram=2`、码点级、产出全部长度）保持不变，即 `mode=dense` 的一种取值，直接在 ANALYZER 里写 `"tokenizer"="ngram"` 的老用法仍是老行为；只有显式 `mode=auto/sparse` 才启用新行为。已经用 `ngram` tokenizer 建好的 INVERTED 索引在升级后**自动获得** LIKE/REGEXP 加速：编译器按其 tokenizer 参数（稠密码点 gram）编译，无需重建。
 
-一个正确性约束：gram 族下的大小写折叠必须发生在**边界哈希之前**（相当于 char filter 阶段），否则查询字面量与数据的大小写不同时边界位置不同、gram 不同，会漏结果。因此 `lower_case=true` 对 gram 族的实现定义为「提取前对输入折叠」；analyzer 里的 `lowercase` token filter（提取后折叠）与 `mode=sparse/auto` 组合由校验器直接拒绝。
+一个正确性约束：gram 族下的大小写折叠必须发生在**边界哈希之前**（相当于 char filter 阶段），否则查询字面量与数据的大小写不同时边界位置不同、gram 不同，会漏结果。因此折叠开关是 `ngram` tokenizer 自己的属性 `lower_case`（提取前对输入折叠），而不是索引级属性（索引级 `lower_case` 只对内置 parser 生效）；analyzer 里的 `lowercase` token filter（提取后折叠）与 `mode=sparse/auto` 组合由校验器直接拒绝。
 
 用户抉择表（产品文档口径）：
 
@@ -444,7 +459,7 @@ CREATE INVERTED INDEX TOKENIZER gram_log PROPERTIES(
 |---|---|---|
 | 分词全文检索（相关性、短语） | `INVERTED` + 语言 parser（english/chinese/unicode/…） | `MATCH_*` |
 | 子串 / 正则 / LIKE 加速 | `INVERTED` + `"analyzer"=<以 ngram 为 tokenizer 的 analyzer>` | `LIKE` / `REGEXP`，自动走索引 |
-| 两者都要 | 同列两个 INVERTED 索引（不同 analyzer）；需确认并放开现有「一列一个倒排索引」的限制（开放问题 Q4）。放开之前，ngram 索引也能服务 `MATCH_ALL`（token = gram 语义） | 各走各的函数 |
+| 两者都要 | 同列两个 INVERTED 索引（不同 analyzer），FE 已支持（Q4 已核实） | 各走各的函数 |
 | 老表已有 `NGRAM_BF` | 继续可用（仅 LIKE、页级）；建议 `DROP INDEX` 后改建 `INVERTED` + ngram analyzer | — |
 
 实现映射（与前文一致）：FE `NGramTokenizerValidator` 新增三个参数的校验；tokenizer 参数 → 段级 index meta 的 `gram_scheme`（§6.2.3）；`GramExtractor` 作为 `ngram` tokenizer 的 auto/sparse 模式实现注册进现有 `analysis_factory_mgr`；`InvertedIndexColumnWriter::add_values` 在 gram 族分词器下 `omit_term_freq_and_positions=true`（v1）；BE 从 analyzer 定义识别「gram 族」的依据是 tokenizer type == ngram。
@@ -521,7 +536,7 @@ CREATE INVERTED INDEX TOKENIZER gram_log PROPERTIES(
 #### 6.4.1 FE 侧识别与下推
 
 - Nereids：`Regexp`/`RegexpLike`/`Like` 表达式在其列拥有 `sparse_gram/dense_gram` 索引且模式为常量时，标记为可走索引的 common expr 下推（与 `match` 系函数的处理一致），**不依赖 `enable_function_pushdown`**（该变量只门控 LIKE 转 `LikeColumnPredicate` 的老路径，且默认 false）。
-- 会话变量：`enable_regex_gram_index`（默认 true）、`regex_gram_index_max_candidate_ratio`（候选比例阈值，默认 0.3：编译后估计候选 > 30% 行时放弃索引，避免付出 posting I/O 而无收益）。
+- 开关：P0 用 BE 配置 `enable_gram_index_regexp`（默认 true）作总开关，并沿用既有会话变量 `enable_inverted_index_query`；P1 再加会话变量 `enable_regex_gram_index` 与 `regex_gram_index_max_candidate_ratio`（候选比例阈值，默认 0.3：编译后估计候选 > 30% 行时放弃索引，避免付出 posting I/O 而无收益）。
 
 #### 6.4.2 BE 侧：近似索引语义（关键改动点）
 
@@ -625,7 +640,7 @@ CREATE INVERTED INDEX TOKENIZER gram_log PROPERTIES(
 | Q1 | 是否把 `LIKE` 也切到本索引的行级路径（替代 `LikeColumnPredicate` + NGRAM_BF）？ | — | 建议是（同一编译器、同一路径），但作为独立小 PR |
 | Q2 | 默认 p / L / τ 的最终取值 | — | 用 §9 的端到端基准在 3 个真实表上定；本文推荐 0.25 / 16 / 0.10 |
 | Q3 | 是否需要查询侧 `(?i)` 展开（≤8 变体）作为无 lower_case 索引时的兜底？ | — | v1 不做（Cox/Zoekt 经验：精度差、posting 读 8×） |
-| Q4 | 是否放开「一列只能有一个 INVERTED 索引」的限制，允许同列同时有语言分词索引与 ngram 索引（不同 analyzer）？ | 产品能力 | 建议放开，按 analyzer 区分；放开前 ngram 索引可兼服务 `MATCH_ALL` |
+| Q4 | 同列同时有语言分词索引与 ngram 索引（不同 analyzer）是否可行？ | 产品能力 | **已核实可行**：FE 在 V2+/SNII 上允许同列多个 INVERTED 索引，以 analyzer identity 去重（`InvertedIndexUtil.canHaveMultipleInvertedIndexes`），无需改动 |
 
 ## 9. 实施计划
 
@@ -663,7 +678,7 @@ CREATE INVERTED INDEX TOKENIZER gram_log PROPERTIES(
 
 ### 9.3 交付物
 
-- 本设计文档（评审后转为实施计划，按 brainstorming → writing-plans 流程）。
+- 本设计文档；P0 实施计划见 `be/src/storage/index/inverted/REGEX_SPARSE_GRAM_INDEX_P0_PLAN.md`（16 个 Task，含测试与实现代码）。
 - 原型工具与全部实验输出：`tools/regex-ngram-model/`（可复现 §4 全部表格）。
 - 评审后：P0 的实施计划文档 + 按 §9.1 拆分的 PR 序列（编译器可作为第一个独立 PR，因其无存储依赖、可单测）。
 
