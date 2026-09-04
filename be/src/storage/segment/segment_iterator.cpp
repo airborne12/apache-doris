@@ -1375,7 +1375,10 @@ void SegmentIterator::_apply_approx_index_result(VExprContext* expr_ctx) {
     // _common_expr_ctxs_push_down 里，由 _execute_common_expr 在候选行上逐行复验。
     const auto* approx =
             expr_ctx->get_index_context()->get_approx_index_result_for_expr(expr_ctx->root().get());
-    if (approx == nullptr) {
+    if (approx == nullptr || approx->get_data_bitmap() == nullptr) {
+        // InvertedIndexResultBitmap 允许 data bitmap 为空指针（默认构造的“无结果”形态）。
+        // 近似表里理论上只会存 is_empty() == false 的结果，但这里的解引用一旦碰上空指针
+        // 就是段错误，代价远大于多一次判空。
         return;
     }
     const uint64_t before = _row_bitmap.cardinality();
