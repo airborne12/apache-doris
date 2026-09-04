@@ -148,10 +148,21 @@ public:
         analyzer.type = doris::TIndexPolicyType::ANALYZER;
         analyzer.properties["tokenizer"] = "gram_sparse_tokenizer";
 
-        manager_.apply_policy_changes({tokenizer, analyzer}, {});
+        // 同一个 gram 族 tokenizer，但挂了一个 token filter：R22 要求这样的 analyzer
+        // 一律不算 gram 族（filter 会改写 token，落库 term 不再等于抽取器的产出）。
+        doris::TIndexPolicy filtered_analyzer;
+        filtered_analyzer.id = 9003;
+        filtered_analyzer.name = filtered_analyzer_name();
+        filtered_analyzer.type = doris::TIndexPolicyType::ANALYZER;
+        filtered_analyzer.properties["tokenizer"] = "gram_sparse_tokenizer";
+        filtered_analyzer.properties["token_filter"] = "lowercase";
+
+        manager_.apply_policy_changes({tokenizer, analyzer, filtered_analyzer}, {});
     }
 
     ~ScopedGramPolicies() { doris::ExecEnv::GetInstance()->_index_policy_mgr = previous_; }
+
+    static std::string filtered_analyzer_name() { return "gram_sparse_filtered"; }
 
     doris::IndexPolicyMgr& manager() { return manager_; }
 
@@ -612,6 +623,84 @@ TEST(SniiWriterTest, NonGramAnalyzerHasNoScheme) {
     EXPECT_FALSE(gram::resolve_gram_scheme(index_meta.properties(),
                                            doris::ExecEnv::GetInstance()->index_policy_mgr())
                          .has_value());
+}
+
+// R21 回归护栏：内置 analyzer 名（standard/english/...）从不注册成索引策略，问策略管理器
+// 一定抛 "Policy not found"。gram 族识别一旦走策略管理器，每一个
+// PROPERTIES("analyzer"="standard") 的存量索引都会建不起来——这里刻意装上一个只含 gram
+// 策略的管理器，确保内置名既不进管理器、也不改变原有的 config 结论。
+TEST(SniiWriterTest, BuiltinAnalyzerNameStillInitialises) {
+    ScopedGramPolicies policies; // 管理器里只有 gram 族策略，没有 "standard"/"english"
+    const std::vector<std::map<std::string, std::string>> cases {
+            {{"analyzer", "standard"}, {"support_phrase", "true"}},
+            {{"parser", "english"}}}; // legacy parser 写法
+    int64_t index_id = 9012;
+    for (const auto& props : cases) {
+        doris::TabletIndex index_meta;
+        init_gram_index_meta(&index_meta, index_id++, props);
+        doris::segment_v2::SniiIndexColumnWriter writer(nullptr, &index_meta,
+                                                        doris::FieldType::OLAP_FIELD_TYPE_VARCHAR);
+        ASSERT_OK(writer.init());
+        EXPECT_FALSE(writer.gram_scheme_for_test().has_value());
+        // config 完全由 support_phrase 决定，与 gram 族判定无关。
+        EXPECT_EQ(writer.config_for_test(), props.contains("support_phrase")
+                                                    ? IndexConfig::kDocsPositions
+                                                    : IndexConfig::kDocsOnly);
+    }
+}
+
+// 反面：analyzer 名既不是内置名、策略管理器里也没有 —— 这是真正的配置错误，必须保持
+// 原有行为（analyzer 创建阶段报 INVERTED_INDEX_ANALYZER_ERROR），不能被 R21 的短路吞掉。
+TEST(SniiWriterTest, MissingAnalyzerPolicyFailsInit) {
+    ScopedGramPolicies policies;
+    const std::map<std::string, std::string> props {{"analyzer", "no_such_policy"}};
+    doris::TabletIndex index_meta;
+    init_gram_index_meta(&index_meta, 9014, props);
+    doris::segment_v2::SniiIndexColumnWriter writer(nullptr, &index_meta,
+                                                    doris::FieldType::OLAP_FIELD_TYPE_VARCHAR);
+    const auto status = writer.init();
+    EXPECT_EQ(status.code(), doris::ErrorCode::INVERTED_INDEX_ANALYZER_ERROR) << status;
+}
+
+// R22：gram 族 tokenizer 一旦挂上 token filter，落库 term 就不再等于
+// GramExtractor.extract(原始列值)，必须按"不是 gram 族"处理 —— 既不上报方案，也不能
+// 顺手把用户要的短语位置抹掉。
+TEST(SniiWriterTest, TokenFilteredGramAnalyzerIsNotGramFamily) {
+    ScopedGramPolicies policies;
+    const std::string analyzer_name = ScopedGramPolicies::filtered_analyzer_name();
+    auto provider = policies.manager().get_analyzer_provider_by_name(analyzer_name);
+    ASSERT_NE(provider, nullptr);
+    EXPECT_FALSE(provider->gram_scheme().has_value());
+
+    const std::map<std::string, std::string> props {{"analyzer", analyzer_name},
+                                                    {"support_phrase", "true"}};
+    doris::TabletIndex index_meta;
+    init_gram_index_meta(&index_meta, 9015, props);
+    doris::segment_v2::SniiIndexColumnWriter writer(nullptr, &index_meta,
+                                                    doris::FieldType::OLAP_FIELD_TYPE_VARCHAR);
+    ASSERT_OK(writer.init());
+    EXPECT_FALSE(writer.gram_scheme_for_test().has_value());
+    EXPECT_EQ(writer.config_for_test(), IndexConfig::kDocsPositions); // 不强制 docs-only
+}
+
+// R22 的另一半：索引级 char_filter 由写入器自己包在 reader 外层，policy provider 看不见
+// 它，因此 provider 仍会报出方案 —— 必须由写入器把它按下去。
+TEST(SniiWriterTest, IndexLevelCharFilterIsNotGramFamily) {
+    ScopedGramPolicies policies;
+    EXPECT_TRUE(policies.manager()
+                        .get_analyzer_provider_by_name("gram_sparse")
+                        ->gram_scheme()
+                        .has_value());
+
+    const std::map<std::string, std::string> props {{"analyzer", "gram_sparse"},
+                                                    {"char_filter_type", "char_replace"},
+                                                    {"char_filter_pattern", "._"}};
+    doris::TabletIndex index_meta;
+    init_gram_index_meta(&index_meta, 9016, props);
+    doris::segment_v2::SniiIndexColumnWriter writer(nullptr, &index_meta,
+                                                    doris::FieldType::OLAP_FIELD_TYPE_VARCHAR);
+    ASSERT_OK(writer.init());
+    EXPECT_FALSE(writer.gram_scheme_for_test().has_value());
 }
 
 TEST(SniiDocIdSinkGrowth, AppendRangeGrowsGeometrically) {
