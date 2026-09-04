@@ -27,6 +27,44 @@
 #include "storage/index/snii/encoding/section_framer.h"
 
 namespace doris::snii::format {
+
+// Storage 是 Unity Build（多个 .cpp 合并进同一个 unity_N_cxx.cxx TU）：同目录其他 .cpp
+// 里可能存在同名的文件级 helper，因此 gram_scheme 的编解码 helper 单独放进这个文件专属
+// 命名空间（内层仍套一层匿名命名空间保持内部链接），不与下面已有的匿名命名空间共享，
+// 避免任何跨文件同名符号在 Unity TU 里撞在一起（Ruling R8）。
+namespace core_metadata_detail {
+namespace {
+
+void encode_gram_scheme(const segment_v2::gram::GramScheme& scheme,
+                        doris::snii::SniiGramSchemePB* out) {
+    out->set_mode(static_cast<uint32_t>(scheme.mode));
+    out->set_min_len(scheme.min_len);
+    out->set_max_len(scheme.max_len);
+    out->set_density_permille(scheme.density_permille);
+    out->set_stop_df_permille(scheme.stop_df_permille);
+    out->set_lower_case(scheme.lower_case);
+    out->set_hash_version(scheme.hash_version);
+}
+
+Status decode_gram_scheme(const doris::snii::SniiGramSchemePB& input,
+                          segment_v2::gram::GramScheme* out) {
+    if (input.mode() != 1 && input.mode() != 2) {
+        return Status::Error<ErrorCode::INVERTED_INDEX_FILE_CORRUPTED, false>(
+                "core metadata: unsupported gram scheme mode");
+    }
+    *out = {.mode = static_cast<segment_v2::gram::GramMode>(input.mode()),
+            .min_len = input.min_len(),
+            .max_len = input.max_len(),
+            .density_permille = input.density_permille(),
+            .stop_df_permille = input.stop_df_permille(),
+            .lower_case = input.lower_case(),
+            .hash_version = input.hash_version()};
+    return Status::OK();
+}
+
+} // namespace
+} // namespace core_metadata_detail
+
 namespace {
 
 using segment_v2::inverted_index::CommonGramsCoverage;
@@ -194,6 +232,13 @@ Status decode_core_pb(const doris::snii::SniiCoreMetadataPB& input, CoreMetadata
         out->common_grams_metadata = std::move(common_grams);
     }
 
+    if (input.has_gram_scheme()) {
+        segment_v2::gram::GramScheme gram_scheme;
+        RETURN_IF_ERROR(
+                core_metadata_detail::decode_gram_scheme(input.gram_scheme(), &gram_scheme));
+        out->gram_scheme = gram_scheme;
+    }
+
     RETURN_IF_ERROR(validate_posting_policy(input.common_grams_posting_policy(),
                                             &out->common_grams_posting_policy));
     if (out->common_grams_posting_policy == CommonGramsPostingPolicy::kHybridV1 &&
@@ -241,6 +286,9 @@ Status encode_core_metadata(const CoreMetadata& metadata, ByteSink* out) {
     encode_region_ref(metadata.section_refs.bsbf, refs->mutable_bsbf());
     if (metadata.common_grams_metadata.has_value()) {
         encode_common_grams(*metadata.common_grams_metadata, core.mutable_common_grams());
+    }
+    if (metadata.gram_scheme.has_value()) {
+        core_metadata_detail::encode_gram_scheme(*metadata.gram_scheme, core.mutable_gram_scheme());
     }
     if (metadata.common_grams_posting_policy != CommonGramsPostingPolicy::kNone) {
         core.set_common_grams_posting_policy(
