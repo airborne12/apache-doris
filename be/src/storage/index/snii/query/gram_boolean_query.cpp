@@ -27,15 +27,14 @@
 
 namespace doris::snii::query {
 
-// R8/R24 (Unity Build): file-scope helpers live in this file-unique named
-// namespace rather than a bare anonymous namespace, so a Unity Build never
-// collides this translation unit's symbols with another file's.
+// R8/R24（Unity Build）：文件级辅助实现放在这个本文件专属的具名命名空间里，
+// 而不是裸的匿名命名空间，这样 Unity Build 下就不会与其他文件的符号冲突。
 namespace gram_boolean_query_detail {
 
-// Mirrors snii_index_reader.cpp's anonymous-namespace RoaringDocIdSink exactly
-// (addMany for a non-empty batch, addRange(first, last_exclusive) for a non-empty
-// range, dedups()==true so multi-gram OR/AND can stream postings straight into the
-// bitmap); that class cannot be reused across translation units, hence this copy.
+// 与 snii_index_reader.cpp 匿名命名空间里的 RoaringDocIdSink 行为完全一致
+// （非空批次走 addMany，非空区间走 addRange(first, last_exclusive)，
+// dedups()==true 使多 gram 的 OR/AND 可以把 posting 直接流式写入同一个
+// 位图）；那个类无法跨翻译单元复用，因此这里另外复制一份。
 class RoaringSink final : public DocIdSink {
 public:
     explicit RoaringSink(roaring::Roaring* bitmap) : _bitmap(bitmap) {}
@@ -63,11 +62,10 @@ private:
 Status eval(GramPostingSource& src, const segment_v2::gram::GramQuery& q, uint32_t num_docs,
             roaring::Roaring* out);
 
-// AND: df-first gram lookup so a missing gram short-circuits to empty without
-// reading a single posting; the remaining gram leaves are then intersected in
-// ascending-df order (cheapest driver first, early exit the moment the running
-// intersection is empty), followed by the same intersect-with-early-exit treatment
-// for every sub-query. An AND with neither gram leaves nor sub-queries is ALL.
+// AND：先对 gram 查 df，缺失的 gram 让整体直接短路为空，不读取任何
+// posting；剩余的 gram 叶子按 df 升序求交（最省成本的驱动项排最前面，
+// 交集一旦为空立即提前返回），随后以同样的「求交+提前返回」方式处理每个
+// 子查询。既无 gram 叶子也无子查询的 AND 视为 ALL。
 Status eval_and(GramPostingSource& src, const segment_v2::gram::GramQuery& q, uint32_t num_docs,
                 roaring::Roaring* out) {
     std::vector<std::pair<uint64_t, const std::string*>> order;
@@ -123,7 +121,7 @@ Status eval_and(GramPostingSource& src, const segment_v2::gram::GramQuery& q, ui
     return Status::OK();
 }
 
-// OR: union every direct gram leaf's postings and every sub-query's evaluation.
+// OR：对每个直属 gram 叶子的 postings 与每个子查询的求值结果求并。
 Status eval_or(GramPostingSource& src, const segment_v2::gram::GramQuery& q, uint32_t num_docs,
                roaring::Roaring* out) {
     for (const auto& gram : q.grams) {
