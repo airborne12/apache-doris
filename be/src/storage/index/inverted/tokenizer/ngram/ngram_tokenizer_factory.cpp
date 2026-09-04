@@ -29,20 +29,15 @@ Status NGramTokenizerFactory::parse_gram_scheme(const Settings& settings,
                                                 std::optional<gram::GramScheme>* out) {
     out->reset();
     // "mode" 出现即进入 gram 族（sparse|dense|auto），与 legacy ngram 的滑窗窗口互斥；
-    // gram 族的方案解析、校验全部委托给 GramScheme::from_properties，这里只负责把
-    // tokenizer 属性透传过去、补齐 gram 族自己的默认 min/max_gram。
+    // gram 族的方案解析、校验、默认值全部委托给 GramScheme::from_properties，这里只负责把
+    // tokenizer 属性透传过去。min/max_gram 缺省时由 GramScheme 的成员初值（3/16）给出，
+    // 不在这里再注入一份副本——两处默认值早晚会漂移，唯一真源只能有一个。
     if (settings.get_string("mode").empty()) {
         return Status::OK();
     }
     std::map<std::string, std::string> props;
     for (const auto& [k, v] : settings.sorted_entries()) {
         props.emplace(k, v);
-    }
-    if (!props.contains("min_gram")) {
-        props["min_gram"] = "3"; // gram 族默认值不同于 legacy 的 1/2
-    }
-    if (!props.contains("max_gram")) {
-        props["max_gram"] = "16";
     }
     gram::GramScheme scheme;
     RETURN_IF_ERROR(gram::GramScheme::from_properties(props, &scheme));

@@ -17,6 +17,8 @@
 
 #include "storage/index/inverted/tokenizer/ngram/gram_tokenizer.h"
 
+#include "common/logging.h"
+
 namespace doris::segment_v2::inverted_index {
 
 void GramTokenizer::reset() {
@@ -31,6 +33,9 @@ void GramTokenizer::reset() {
     // 与 NGramTokenizer::reset() 一致：一次性读取全量输入（ngram_tokenizer.cpp:83-94）。
     _char_length = _in->read(reinterpret_cast<const void**>(&_char_buffer), 0,
                              static_cast<int32_t>(_in->size()));
+    // 必须一次读全：少读一个字节就会少切出若干 gram，直接破坏"落库 gram 是查询侧所需
+    // gram 的超集"这条不变式（漏行且无从察觉）。
+    DCHECK_EQ(_char_length, static_cast<int32_t>(_in->size()));
     if (_char_length <= 0 || _char_buffer == nullptr) {
         return;
     }

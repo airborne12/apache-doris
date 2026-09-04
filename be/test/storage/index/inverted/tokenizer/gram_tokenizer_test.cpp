@@ -90,6 +90,32 @@ TEST(GramTokenizerTest, DenseModeAndAutoAlias) {
     EXPECT_EQ(f2.gram_scheme()->mode, gram::GramMode::SPARSE); // P0：auto = sparse
 }
 
+// min/max_gram 缺省时的默认值来自 GramScheme 的成员初值（3/16），工厂不再注入副本。
+TEST(GramTokenizerTest, GramDefaultsComeFromGramScheme) {
+    NGramTokenizerFactory factory;
+    std::unordered_map<std::string, std::string> args {{"mode", "sparse"}};
+    factory.initialize(Settings(args));
+    ASSERT_TRUE(factory.gram_scheme().has_value());
+    EXPECT_EQ(factory.gram_scheme()->min_len, 3U);
+    EXPECT_EQ(factory.gram_scheme()->max_len, 16U);
+}
+
+// lower_case=true 时折叠发生在切分之前（边界哈希也算在折叠后的字节上），因此大小写不同
+// 的同一段文本必须切出完全相同的 gram 序列。
+TEST(GramTokenizerTest, LowerCaseFoldsBeforeExtraction) {
+    NGramTokenizerFactory factory;
+    std::unordered_map<std::string, std::string> args {{"mode", "sparse"}, {"lower_case", "true"}};
+    factory.initialize(Settings(args));
+    ASSERT_TRUE(factory.gram_scheme().has_value());
+    EXPECT_TRUE(factory.gram_scheme()->lower_case);
+    EXPECT_EQ(gram_tokenize(factory, "Code = Unavailable"),
+              gram_tokenize(factory, "code = unavailable"));
+    // 换一段够长、确定能切出 gram 的输入，避免上面那条在两边都为空时空转。
+    const auto mixed = gram_tokenize(factory, "RPC error: Code = Unavailable");
+    EXPECT_FALSE(mixed.empty());
+    EXPECT_EQ(mixed, gram_tokenize(factory, "rpc error: code = unavailable"));
+}
+
 TEST(GramTokenizerTest, GramModeSkipsLegacyMinMaxGapCheck) {
     // 现状 initialize 对 max_gram-min_gram>1 抛 INVALID_ARGUMENT（ngram_tokenizer_factory.cpp:29-36）；
     // gram 族在 mode 分支内直接 return，不受此限。

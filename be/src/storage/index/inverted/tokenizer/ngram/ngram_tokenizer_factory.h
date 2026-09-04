@@ -73,6 +73,7 @@ public:
     // CustomAnalyzerProvider（gram/gram_family.h 的使用方）都必须调用它，不得各自复制一份
     // 属性解析逻辑（R16 DRY）。"mode" 缺省时 *out 置为 nullopt 并返回 OK（legacy ngram）；
     // 出现非法取值（如未知的 mode、越界的 min/max_gram）时返回 InvalidArgument，*out 保持 nullopt。
+    // 未出现的键一律取 GramScheme 自身的成员初值（min_gram=3 / max_gram=16 等）。
     static Status parse_gram_scheme(const Settings& settings, std::optional<gram::GramScheme>* out);
 
 private:

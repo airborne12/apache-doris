@@ -50,15 +50,31 @@ Status decode_gram_scheme(const doris::snii::SniiGramSchemePB& input,
                           segment_v2::gram::GramScheme* out) {
     if (input.mode() != 1 && input.mode() != 2) {
         return Status::Error<ErrorCode::INVERTED_INDEX_FILE_CORRUPTED, false>(
-                "core metadata: unsupported gram scheme mode");
+                "core metadata: unsupported gram scheme mode {}", input.mode());
     }
-    *out = {.mode = static_cast<segment_v2::gram::GramMode>(input.mode()),
+    const segment_v2::gram::GramScheme scheme {
+            .mode = static_cast<segment_v2::gram::GramMode>(input.mode()),
             .min_len = input.min_len(),
             .max_len = input.max_len(),
             .density_permille = input.density_permille(),
             .stop_df_permille = input.stop_df_permille(),
             .lower_case = input.lower_case(),
             .hash_version = input.hash_version()};
+    // 逐字段的合法区间只写在 GramScheme::from_properties 一处（唯一真源），所以这里用
+    // "属性往返"来复用它：落盘的方案必须能原样往返回同一个方案，否则视为文件损坏。
+    // 缺了这一步，一条半截的（或被改坏的）PB 会带着 min_len=0 之类的值一路流进
+    // GramExtractor —— 半条消息里所有未设置的字段都是 0，而 0 不是任何合法方案。
+    segment_v2::gram::GramScheme round_tripped;
+    const Status validated =
+            segment_v2::gram::GramScheme::from_properties(scheme.to_properties(), &round_tripped);
+    if (!validated.ok() || !(round_tripped == scheme)) {
+        return Status::Error<ErrorCode::INVERTED_INDEX_FILE_CORRUPTED, false>(
+                "core metadata: invalid gram scheme (mode={}, min_len={}, max_len={}, "
+                "density_permille={}, stop_df_permille={}, hash_version={}): {}",
+                input.mode(), scheme.min_len, scheme.max_len, scheme.density_permille,
+                scheme.stop_df_permille, scheme.hash_version, validated.to_string());
+    }
+    *out = scheme;
     return Status::OK();
 }
 

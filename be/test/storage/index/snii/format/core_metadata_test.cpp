@@ -304,7 +304,7 @@ TEST(SniiCoreMetadata, RejectsBadFrameTypeCrcAndTruncation) {
                         .is<ErrorCode::INVERTED_INDEX_FILE_CORRUPTED>());
 }
 
-TEST(CoreMetadataTest, GramSchemeRoundTrip) {
+TEST(SniiCoreMetadata, GramSchemeRoundTrip) {
     auto expected = sample_core();
     GramScheme scheme;
     scheme.mode = GramMode::DENSE;
@@ -333,6 +333,41 @@ TEST(CoreMetadataTest, GramSchemeRoundTrip) {
     doris::snii::SniiCoreMetadataPB none_pb;
     ASSERT_TRUE(none_pb.ParseFromArray(none_payload.data(), static_cast<int>(none_payload.size())));
     EXPECT_FALSE(none_pb.has_gram_scheme());
+}
+
+TEST(SniiCoreMetadata, GramSchemeSparseRoundTrip) {
+    auto expected = sample_core();
+    expected.gram_scheme = GramScheme {}; // 成员初值即 SPARSE / 3 / 16 / 250 / 100 / lc0 / v1
+
+    CoreMetadata actual;
+    ASSERT_TRUE(decode_core_metadata(Slice(encode(expected)), &actual).ok());
+    ASSERT_TRUE(actual.gram_scheme.has_value());
+    EXPECT_EQ(actual.gram_scheme->mode, GramMode::SPARSE);
+    EXPECT_EQ(actual.gram_scheme->min_len, 3U);
+    EXPECT_EQ(actual.gram_scheme->max_len, 16U);
+    EXPECT_EQ(actual.gram_scheme->density_permille, 250U);
+    expect_core_eq(expected, actual);
+}
+
+// 解码必须把整个方案校验到底，而不只是看一眼 mode：越界的方案一旦放过去，就会带着
+// min_len=0 之类的值直接喂给 GramExtractor。
+TEST(SniiCoreMetadata, RejectsCorruptGramScheme) {
+    auto metadata = sample_core();
+    metadata.gram_scheme = GramScheme {};
+
+    // mode 只允许 1(DENSE) / 2(SPARSE)。
+    const auto bad_mode = mutate_core_payload(
+            metadata, [](auto* core) { core->mutable_gram_scheme()->set_mode(7); });
+    CoreMetadata actual;
+    auto status = decode_core_metadata(Slice(frame_payload(bad_mode)), &actual);
+    EXPECT_TRUE(status.is<ErrorCode::INVERTED_INDEX_FILE_CORRUPTED>()) << status;
+
+    // 半条消息：只设了 mode，其余字段按 PB 语义默认为 0，而 0 不是任何合法方案。
+    const auto partial = mutate_core_payload(sample_core(), [](auto* core) {
+        core->mutable_gram_scheme()->set_mode(static_cast<uint32_t>(GramMode::SPARSE));
+    });
+    status = decode_core_metadata(Slice(frame_payload(partial)), &actual);
+    EXPECT_TRUE(status.is<ErrorCode::INVERTED_INDEX_FILE_CORRUPTED>()) << status;
 }
 
 TEST(SniiCoreMetadata, ResetsOutputBeforeDecodeFailureAndNullOutputIsInvalid) {
