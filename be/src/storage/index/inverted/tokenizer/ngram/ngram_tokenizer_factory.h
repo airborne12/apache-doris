@@ -17,8 +17,12 @@
 
 #pragma once
 
+#include <optional>
+
+#include "storage/index/inverted/gram/gram_scheme.h"
 #include "storage/index/inverted/setting.h"
 #include "storage/index/inverted/tokenizer/ngram/char_matcher.h"
+#include "storage/index/inverted/tokenizer/ngram/gram_tokenizer.h"
 #include "storage/index/inverted/tokenizer/ngram/ngram_tokenizer.h"
 #include "storage/index/inverted/tokenizer/tokenizer_factory.h"
 
@@ -32,6 +36,9 @@ public:
     void initialize(const Settings& settings) override;
 
     TokenizerPtr create() override {
+        if (_gram_scheme.has_value()) {
+            return std::make_shared<GramTokenizer>(*_gram_scheme);
+        }
         if (_matcher == nullptr) {
             return std::make_shared<NGramTokenizer>(_min_gram, _max_gram);
         } else {
@@ -54,6 +61,10 @@ public:
         return PositionCapability::kAlwaysUnitIncrement;
     }
 
+    // gram 族（tokenizer 属性含 "mode"）时返回方案；legacy ngram（"mode" 缺省）时为空，
+    // 供 Task 8/12 判断当前 tokenizer 是否处于 gram 族以及取得其方案参数。
+    std::optional<gram::GramScheme> gram_scheme() const { return _gram_scheme; }
+
     static void initialize_matchers();
     static CharMatcherPtr parse_token_chars(const Settings& settings);
 
@@ -63,6 +74,7 @@ private:
     int32_t _min_gram = 0;
     int32_t _max_gram = 0;
     CharMatcherPtr _matcher;
+    std::optional<gram::GramScheme> _gram_scheme; // "mode" 存在时有值，此时 create() 走 gram 族
 };
 
 }; // namespace doris::segment_v2::inverted_index
