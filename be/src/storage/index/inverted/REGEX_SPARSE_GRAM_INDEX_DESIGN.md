@@ -119,8 +119,8 @@
 |---|---|
 | V4 / SPIMI 存储格式 | `SNII` |
 | `SpimiPostingBuffer::Append(term, doc_id, position)` | `SpimiTermBuffer::add_token(term, docid, pos, retain_positions)`（`snii/writer/spimi_term_buffer.h:234`） |
-| `SpimiIndexWriter` / `InvertedIndexColumnWriter` V4 分支 | `SniiIndexColumnWriter`（`snii/snii_index_writer.h:46-143`），docs-only 由 `support_phrase` 决定（`.cpp:74-77`） |
-| `SpimiFulltextIndexReader` / `SpimiQueryExecutor::match_all/match_any/add_term_docs` | `SniiIndexReader::execute_snii_query`（`snii_index_reader.cpp:348-433`）+ `snii::query::term_query/boolean_and/boolean_or`（`snii/query/*.h`）+ `LogicalIndexReader::lookup`（`snii/reader/logical_index_reader.h:106`） |
+| `SpimiIndexWriter` / `InvertedIndexColumnWriter` V4 分支 | `SniiIndexColumnWriter`（`snii/snii_index_writer.h:50-158`）；gram 族命中时**强制** docs-only 并忽略 `support_phrase`（`.cpp:90-93`，Ruling R15） |
+| `SpimiFulltextIndexReader` / `SpimiQueryExecutor::match_all/match_any/add_term_docs` | `execute_snii_query`（`snii_index_reader.cpp:350-462`）+ `snii::query::term_query/boolean_and/boolean_or`（`snii/query/*.h`）+ `LogicalIndexReader::lookup`（`snii/reader/logical_index_reader.h:106`） |
 | `docFreq` | `LogicalIndexReader::lookup` 返回的 `DictEntry.df` |
 | 段级元数据 `.fnm`/`segments_N` | `SniiCoreMetadataPB`（`gensrc/proto/snii.proto:76-82`，只追加字段） |
 | tokenizer 目录 `analysis/tokenizer/` | `be/src/storage/index/inverted/tokenizer/` |
@@ -377,6 +377,7 @@ textbench，稠密 3-gram 行级，REAL 口径（候选数 ≈ 真值数，说�
 - 段 flush 时已知每个 gram 的 df；`df/N > τ`（默认 τ=0.25，属性可调）的 gram **不写 posting**，而是记入段内 `stop-gram` 列表（几十到几百项）。
 - 查询语义：stop-gram → `ALL`；**词典中不存在的 gram → `NONE`**（这是 gram 索引最强的剪枝，绝不能因为裁剪而丢失，所以必须显式区分「被裁」与「不存在」）。
 - 收益：textbench 稠密模式 85% → 48%（τ=0.05）且中位加速不降；httplogs 中 df>50% 的 21 个 gram 占 posting 的 49.9%。
+- **P0 实现状态：未落地。** `stop_gram_df` 在 P0 只被解析（`gram/gram_scheme.cpp`）、写入段级元数据（`snii/format/core_metadata.cpp`）并参与 `GramScheme` 相等性判定，**写入侧没有任何地方按 df 裁剪 gram**。因此 P0 里这个属性等价于 τ=0。B3 实测印证：建表写了 `stop_gram_df=0.25`，httplogs 稠密索引体积 56.0%，正好落在 §4.5「稠密 3-gram 无 τ = 57%」那一档，而不是「τ=0.25 → 41.1%」（见 `tools/regex-ngram-model/results/e2e_B3_httplogs.md` §8 D0）。补齐 τ 是 P1 让低熵短串列进入体积预算的必要项。
 
 #### 6.1.5 大小写与规范化
 
@@ -426,7 +427,7 @@ textbench，稠密 3-gram 行级，REAL 口径（候选数 ≈ 真值数，说�
 
 - 索引类型：仍是 `INVERTED`。
 - 分词：全部走现有索引策略框架。内置 tokenizer `ngram`（`IndexPolicy.BUILTIN_TOKENIZERS`）新增参数 `mode`（auto | sparse | dense）、`density`、`stop_gram_df`、`lower_case`；`min_gram`/`max_gram` 沿用原名，稀疏模式下即 n 与 L。策略是集群级对象，定义一次、多表复用。
-- 查询：`MATCH_*` 在该索引上保持 token 语义（今天已如此）；`LIKE / REGEXP / RLIKE` 新增能力：只要列上的 INVERTED 索引的 analyzer 以 `ngram` tokenizer 为分词器，就自动编译为 gram 查询走索引，建了即生效，不依赖 `enable_function_pushdown`。
+- 查询：`MATCH_*` 在该索引上保持 token 语义（今天已如此）；`LIKE / REGEXP / RLIKE` 新增能力：只要列上的 INVERTED 索引的 analyzer 是**纯 `ngram` tokenizer 且显式带 `mode`**（即「gram 族」，见下方兼容性说明与 §6.7），就自动编译为 gram 查询走索引，建了即生效，不依赖 `enable_function_pushdown`。
 - `NGRAM_BF`：标记为 legacy，文档引导迁移，不再演进；同一列同时存在时 `LIKE` 优先走 INVERTED。
 
 ```sql
@@ -449,9 +450,14 @@ CREATE INVERTED INDEX TOKENIZER gram_log PROPERTIES(
   "density" = "0.25", "stop_gram_df" = "0.10"); -- p 与 τ
 ```
 
-兼容性：内置 `ngram` tokenizer 的默认行为（`min_gram=1`、`max_gram=2`、码点级、产出全部长度）保持不变，即 `mode=dense` 的一种取值，直接在 ANALYZER 里写 `"tokenizer"="ngram"` 的老用法仍是老行为；只有显式 `mode=auto/sparse` 才启用新行为。已经用 `ngram` tokenizer 建好的 INVERTED 索引在升级后**自动获得** LIKE/REGEXP 加速：编译器按其 tokenizer 参数（稠密码点 gram）编译，无需重建。
+兼容性（P0 已实现的形态，Ruling R34）：内置 `ngram` tokenizer 的默认行为（`min_gram=1`、`max_gram=2`、码点级、产出全部长度）保持不变，直接在 ANALYZER 里写 `"tokenizer"="ngram"` 的老用法仍是老行为，且**在任何存储格式上都不受影响**。**是否进入 gram 族只看有没有显式写 `mode`**：`mode` 缺省 → 不是 gram 族，索引照旧、也**不会**自动获得 LIKE/REGEXP 加速（原设计设想的「老索引自动提速」在 P0 未采纳——`GramExtractor` 与 legacy 滑窗的产出并不等价，凭 legacy 参数编译会漏行）；写了 `mode`（含 `mode=dense`）→ 进入 gram 族，此时必须 `inverted_index_storage_format = SNII`（§6.7）。想让老表提速，需要新建一个带 `mode` 的 tokenizer / analyzer 并重建索引。
 
-一个正确性约束：gram 族下的大小写折叠必须发生在**边界哈希之前**（相当于 char filter 阶段），否则查询字面量与数据的大小写不同时边界位置不同、gram 不同，会漏结果。因此折叠开关是 `ngram` tokenizer 自己的属性 `lower_case`（提取前对输入折叠），而不是索引级属性（索引级 `lower_case` 只对内置 parser 生效）；analyzer 里的 `lowercase` token filter（提取后折叠）与 `mode=sparse/auto` 组合由校验器直接拒绝。
+一个正确性约束：gram 族下的大小写折叠必须发生在**边界哈希之前**（相当于 char filter 阶段），否则查询字面量与数据的大小写不同时边界位置不同、gram 不同，会漏结果。因此折叠开关是 `ngram` **tokenizer 自己的属性** `lower_case`（提取前对输入折叠），而不是索引级属性——索引级 `lower_case` 只对内置 parser 生效，对自定义 analyzer（含 gram 族）不起作用，写在 `INDEX ... PROPERTIES` 里不会有任何效果。
+
+由此推广出 gram 族的一条硬约束（P0 已实现，Ruling R31 / R22）：**gram 族 analyzer 必须是「纯 tokenizer」**——不允许挂任何 token filter，也不允许索引级 char_filter。
+
+- FE 侧直接拒绝（`IndexPolicyMgr.validateAnalyzer`）：tokenizer 为 `ngram` 且带 `mode` 时，analyzer 上出现任何 token filter 都报错；`lowercase` token filter 另有一条更明确的错误提示（折叠必须发生在 gram 边界之前）。索引属性里的 `char_filter_type/pattern/replacement` 由 `InvertedIndexUtil.applyGramFamilyIndexDefaults` 拒绝。
+- BE 侧是 fail-safe 兜底（`CustomAnalyzerProvider`）：**只要 analyzer 带有任何 char filter 或 token filter，就一律不认它是 gram 族**，`gram_scheme()` 返回 `nullopt`，查询侧退回全表扫描。gram 族的全部价值建立在「落库 term == `GramExtractor::extract(原始列值)`」这条行不变式上，任何 filter 都会让该等式不再成立；宁可不加速，也不能凭一个不成立的不变式漏行。
 
 用户抉择表（产品文档口径）：
 
@@ -530,13 +536,14 @@ CREATE INVERTED INDEX TOKENIZER gram_log PROPERTIES(
 - `ALL` 时不使用索引，谓词按现状执行；profile 记 `FallbackFullScan`。
 - `NOT REGEXP` / `NOT LIKE`：编译器直接返回 `ALL`（现有 `LikeColumnPredicate::evaluate_and` 忽略 `_opposite` 的隐患在新索引里不复制）。
 - `LIKE`：通配符 `%`/`_` 处切断为字面量段（与现有 `next_in_string_like` 一致），每段走 `grams_of`，段间 `AND`；`ILIKE` 仅在 `lower_case=true` 时可索引。
+- **`(?i)`（P0 实测行为）**：`lower_case=false` 的 tokenizer 下，解析器按 Cox 做法把 `(?i)` 覆盖的每个 ASCII 字母展开成 `CLASS{c,C}`，于是 k 个字母的字面量会产生 2^k 种 gram 组合，迅速超过精确集上限而**退化为 `ALL`**。B1 实测 `(?i)unavailable` 的 `RowsGramIndexFiltered = 0`、`GramIndexCandidateRows = 0`，即完全没走索引（见 `tools/regex-ngram-model/results/e2e_B1_textbench.md`）。因此**大小写不敏感的负载必须建 `lower_case=true` 的 gram tokenizer**（此时索引与查询两侧都先折叠，`(?i)` 可正常编译成 gram 约束），而不是依赖 `(?i)` 本身。
 
 ### 6.4 查询执行
 
 #### 6.4.1 FE 侧识别与下推
 
 - Nereids：`Regexp`/`RegexpLike`/`Like` 表达式在其列拥有 `sparse_gram/dense_gram` 索引且模式为常量时，标记为可走索引的 common expr 下推（与 `match` 系函数的处理一致），**不依赖 `enable_function_pushdown`**（该变量只门控 LIKE 转 `LikeColumnPredicate` 的老路径，且默认 false）。
-- 开关：P0 用 BE 配置 `enable_gram_index_regexp`（默认 true）作总开关，并沿用既有会话变量 `enable_inverted_index_query`；P1 再加会话变量 `enable_regex_gram_index` 与 `regex_gram_index_max_candidate_ratio`（候选比例阈值，默认 0.3：编译后估计候选 > 30% 行时放弃索引，避免付出 posting I/O 而无收益）。
+- 开关（P0 已实现的形态）：**P0 没有为 gram 索引新增任何 FE 会话变量**。总开关是 **BE 配置 `enable_gram_index_regexp`（默认 true，`be/src/common/config.cpp`，可动态改）**，在 `be/src/exprs/function/like.cpp` 的下推入口处判定；另外沿用既有会话变量 `enable_inverted_index_query`（=false 时 `SegmentIterator` 根本不建索引迭代器，gram 下推自然不生效，这也是本项目 E2E 对照基准与回归用例用来做 on/off 对比的开关）。P1 再加会话变量 `enable_regex_gram_index` 与 `regex_gram_index_max_candidate_ratio`（候选比例阈值，默认 0.3：编译后估计候选 > 30% 行时放弃索引，避免付出 posting I/O 而无收益）。
 
 #### 6.4.2 BE 侧：近似索引语义（关键改动点）
 
@@ -546,7 +553,9 @@ CREATE INVERTED INDEX TOKENIZER gram_log PROPERTIES(
 2. 若 `approximate`，**不**从 `_common_expr_ctxs_push_down` 移除该表达式，并把它标注为「仅需在候选行上求值」；
 3. `_next_batch_internal` 的 common expr 阶段按现有流程在 Block 上执行 REGEXP——此时 Block 里只有候选行，即用户要求的「先索引过滤，剩余按 block 匹配」。
 
-页级 I/O 裁剪自动获得：`_range_iter` 只读位图内 rowid，无候选的 page 不解码（`segment_iterator.cpp:2375-2378`）。
+页级 I/O 裁剪自动获得：`_range_iter` 只读位图内 rowid，无候选的 page 不解码（`segment_iterator.cpp:2375-2378`）。**注意这一层裁剪的实际收益取决于候选是否在页内聚集**：命中率 ≥ 1% 且数据未按内容聚簇时，几乎每个 1024 行的 page 都含候选，页级 I/O 一张也省不掉，索引只省下「对非候选行跑正则」的 CPU——B1/B3 的实测取证见 `tools/regex-ngram-model/results/e2e_B1_textbench.md` §8 D1。
+
+编译成 `ALL` 的模式（包括 `lower_case=false` 下的 `(?i)`，见 §6.3.4）不进入本路径：`evaluate_inverted_index` 直接不产出候选位图，谓词按现状全表求值，只多付一次编译开销（实测个位数毫秒）。
 
 #### 6.4.3 gram 查询求值：成本驱动
 
@@ -602,8 +611,10 @@ CREATE INVERTED INDEX TOKENIZER gram_log PROPERTIES(
 
 ### 6.7 兼容性与降级
 
-- `ngram` tokenizer 的 auto/sparse 模式仅 V4（SPIMI）存储格式；V2/V3 存储格式下建索引报错「需要 inverted_index_storage_format=V4」。既有的稠密码点 `ngram` tokenizer 索引不受影响。
-- 旧 BE 读到 auto/sparse 模式的索引：索引不可用但数据可读；FE 版本校验在 tokenizer 参数校验处做。
+- **门槛按「有没有显式 `mode`」划线（Ruling R34，P0 已实现）**：
+  - **legacy 用法**——`ngram` tokenizer **不带** `mode`（只写 `min_gram`/`max_gram`/`token_chars` 的老写法）：行为与升级前完全一致，**任何存储格式（V1/V2/V3/SNII）都不受影响**，FE 不做额外校验，BE 也不把它识别成 gram 族（`IndexPolicyMgr.resolveGramTokenizerMode` 对无 `mode` 的 tokenizer 返回空）。这类索引**不会**自动获得 LIKE/REGEXP 加速。
+  - **显式 `mode`**——只要写了 `mode`（`sparse` / `dense` / `auto`，**含 `dense`**）就进入 gram 族，**必须 `inverted_index_storage_format = SNII`**：FE 在 `InvertedIndexUtil` 里直接报错 `gram tokenizer (mode=…) requires inverted_index_storage_format = SNII`；BE 侧还有第二道栅栏——`resolve_scheme` 拿到 reader 后 `dynamic_cast` 判定必须是 `SniiIndexReader`，CLucene 格式的段（V1/V2/V3）即使属性表里写着 gram 族 analyzer（同一张表的旧段就会这样）也绝不会收到 `GRAM_BOOLEAN_QUERY`，只是静默不加速。
+- 旧 BE 读到带 `mode` 的索引：索引不可用但数据可读；FE 版本校验在 tokenizer 参数校验处做。
 - 索引缺失/损坏/编译 ALL：一律退回现有 REGEXP 执行路径；任何索引侧错误只能导致「不加速」，不能改变结果。
 - 与 NGRAM_BF 并存：同一列允许同时有 NGRAM_BF（服务 LIKE 页级）与 gram 倒排（服务 REGEXP/LIKE 行级）；建议文档引导迁移。
 
@@ -667,14 +678,47 @@ CREATE INVERTED INDEX TOKENIZER gram_log PROPERTIES(
 
 | 编号 | 内容 | 通过标准 |
 |---|---|---|
-| B1 | textbench 30M 行 `Body` 列（现有 E2E 驱动 `e2e_driver2.sh`），29 条正则，`enable_regex_gram_index` on/off 各 5 轮取中位 | 可索引查询 p50 ≥ 10×；结果集逐条一致 |
+| B1 | textbench 30M 行 `Body` 列，29 条正则，索引 on/off 各 5 轮取中位 | 可索引查询 p50 ≥ 10×；结果集逐条一致 |
 | B2 | weibo 500K 行 CJK 列，19 条正则 | p50 ≥ 10×；结果一致 |
-| B3 | httplogs 247M 行 `request` 列，15 条正则 | 选择率 <1% 查询 ≥ 10×；宽泛查询不慢于无索引 ×1.05 |
-| B4 | 三张表的 `index_disk_size / data_disk_size` | 日志与 CJK 表 ≤ 30%；URL 表 ≤ 45%（稠密）或 ≤ 25%（稀疏） |
+| B3 | httplogs `request` 列，15 条正则 | 选择率 <1% 查询 ≥ 10×；宽泛查询不慢于无索引 ×1.05 |
+| B4 | 三张表的 `index_size / raw_column_bytes`（**分母口径见下方勘误**） | 日志与 CJK 表 ≤ 30%；URL 表 ≤ 45%（稠密）或 ≤ 25%（稀疏） |
 | B5 | 云模式（S3 + file cache 冷）：单段单查询的远端请求次数 | 段级布隆未命中 0 次；命中 ≤ 2 次（P1） |
 | B6 | 写入吞吐：带索引 vs 不带索引 stream load | 下降 ≤ 15%（对照现有 V4 全文索引的口径） |
 
-基准方法沿用本项目既有约定：共享开发机上以 CPU 时间/中位数、交错运行为准（见记忆中 SPIMI 基准方法论），磁盘字节与 RSS 为严格对比轴。
+**B4 分母口径勘误**：本表原写 `index_disk_size / data_disk_size`，但 §4.4/§4.5/§4.7 的全部建模百分比（57%、85%、24.8%、27.1%、26.2%、41.1%…）的分母都是**原始列字节（未压缩）**，即 `tools/regex-ngram-model/ngram_model.cpp` 的 `data_bytes`，而不是 Doris 压缩后的段数据。实测「原始列字节 / 段数据」在 textbench 上是 5.2×、httplogs 上是 6.1×（后者的 `.dat` 还含另外 4 列，`request` 列本身压得更狠），两个口径差 5–6 倍，按字面口径 B4 永远不可能通过。故 B4 的分母统一按建模口径写成「原始列字节」，下表两个口径都列出。
+
+#### 9.2.1 P0 实测（HEAD `fdd78aa602c`，2026-09-04，scratch 单机 1 FE + 1 BE / 192 核 / 1510 GB，运行时 loadavg 1min ≈ 28–54）
+
+完整结果与偏差分析：
+[`tools/regex-ngram-model/results/e2e_B1_textbench.md`](../../../../../tools/regex-ngram-model/results/e2e_B1_textbench.md)、
+[`e2e_B2_weibo.md`](../../../../../tools/regex-ngram-model/results/e2e_B2_weibo.md)、
+[`e2e_B3_httplogs.md`](../../../../../tools/regex-ngram-model/results/e2e_B3_httplogs.md)。
+驱动脚本：`tools/regex-ngram-model/e2e/bench_gram_regexp.sh`。
+
+| 编号 | 规模 / 方案 | 导入墙钟 | 可索引 | 加速 p50（墙钟／服务端） | 判定 |
+|---|---|---:|---|---|---|
+| B1 | textbench 30,000,000 行 / 2.33 GiB，`mode=sparse, min_gram=3, max_gram=16, density=0.25` | 177 s（6 路并发） | 23/29 | **3.23× / 4.06×**（选择率 <1% 子集 5.78× / 10.54×） | **FAIL**（标准 ≥10×） |
+| B2 | weibo 500,000 行 / 64.75 MiB，同上稀疏方案 | 18 s（单路） | 18/19 | **1.22× / 1.44×** | **FAIL**（标准 ≥10×） |
+| B3 | httplogs 34,460,091 行 / `request` 1.273 GiB，`mode=dense, min_gram=3, stop_gram_df=0.25` | 215 s（6 路并发） | 15/15 | 选择率 <1%：**4.62× / 6.10×** | **FAIL**（标准 ≥10×） |
+| B3 宽泛 | 同上，选择率 ≥1% 的 8 条 | — | — | 最慢一条 **1.20×**，无一条变慢 | **PASS**（标准 ≥0.952×） |
+| 语义 | B1+B2+B3 共 63 条正则，索引 on/off 逐条对照 `count(*)` | — | — | **63/63 完全一致** | **PASS** |
+
+| 编号 | 表 | 原始列字节 | 段数据 `.dat` | gram 索引 `.idx` | 索引/原始列 | 索引/段数据 | 判定（建模口径） |
+|---|---|---:|---:|---:|---:|---:|---|
+| B4 | textbench（稀疏） | 2,503,778,776 | 482,027,711 | 745,490,696 | **29.8%** | 154.7% | **PASS**（≤30%） |
+| B4 | weibo（稀疏，CJK） | 67,899,657 | 39,669,265 | 18,481,209 | **27.2%** | 46.6% | **PASS**（≤30%） |
+| B4 | httplogs（稠密） | 1,366,647,115 | 223,987,531 | 765,052,497 | **56.0%** | 341.6% | **FAIL**（≤45%）；根因是 §6.1.4 的 τ 在 P0 未实现，实测正好落在模型「稠密无 τ = 57%」那一档 |
+
+B5（S3 冷读远端请求次数）与 B6（写入吞吐对照）本轮未测：B5 依赖 P1 的段级布隆，B6 需要「同表带/不带索引」的对照导入。
+
+**未达 10× 的偏差分析（三份结果文件里有逐条取证，此处只给结论）**：
+
+1. **索引在行 / 页层面完全达标**：`error.*timeout` 开索引只读 128 KB / 2 页，关索引读 2.43 GB / 39,742 页（1/19000 的列 I/O）；56 条可索引查询里，有真值的 52 条的候选/真值比中位数为 **1.00×**（22 条完全相等、30 条放大 ≤1.05×，即候选几乎就是真值，印证 §4.6）；放大明显的只有 5 条，全部是「编译后只剩一个短字面量或高频 CJK 单字」的情形（`手机微博` 78×、`/images/[0-9]+\.gif` 23×、`trace\.rb:[0-9]+:in` 18×、`\[心\]` 15×、`code = (Unavailable|Internal|DeadlineExceeded)` 5.4×）。可索引比例 23/29、18/19、15/15 与 §4.5/§4.7 的建模预测一致。
+2. **端到端比值被两条天花板压平**：(a) 每查询固定开销 ≈ 25–35 ms（客户端连接 12 ms + FE 解析/规划 + fragment 建立），索引侧再快也降不下去；(b) 选择率 ≥1% 且数据未按内容聚簇时，1024 行一页的粒度下几乎每页都含候选，页级 I/O 一张也省不掉（§6.4.2），索引只省正则 CPU。
+3. **无索引基线远强于 §4.6 的建模基线**：§4.6 是单线程 CPU-only 口径；实测是 192 核上 8 tablet × 48 segment 并行 + 全量 page cache 命中，30M 行全扫中位仅 250 ms（≈120M 行/s）。把每查询扫描并行度压到 1（`SET parallel_pipeline_task_num=1`，更接近有并发负载的真实集群）后，同一批 B1 查询的中位加速从 4.3× 升到 7.7×，`context deadline exceeded`（0.0002%）达到 25.08×。
+4. 因此 §4.6 结尾「端到端时无索引路径还要读整列，实际比值会更高」这一预期在**本地 page cache 全命中**的条件下不成立；它成立的场景是 §6.5 的 S3 冷读（对应 B5），本轮未测。
+
+**结论**：P0 的体积目标在日志与 CJK 表上达成、在低熵 URL 表上因 τ 未实现而未达成；语义一致性完全达成；「p50 快一个数量级」在本硬件与本口径下未达成，差距来自固定开销、候选页级不可分离与超强的并行基线，而不是索引本身失效。要在端到端口径上兑现 10×，P1 的优先级应是：§6.1.4 的 τ 裁剪（降体积）、§6.2.2 两层 posting（降体积与 posting I/O）、§6.4.3 的候选比例阈值（避免宽泛查询白付 I/O），以及把验收基准补上 §6.5 的 S3 冷读场景。
 
 ### 9.3 交付物
 
