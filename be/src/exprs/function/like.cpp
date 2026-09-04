@@ -25,14 +25,22 @@
 #include <utility>
 #include <vector>
 
+#include "common/config.h"
+#include "common/exception.h"
 #include "common/logging.h"
 #include "core/block/block.h"
 #include "core/block/column_with_type_and_name.h"
 #include "core/column/column.h"
 #include "core/column/column_const.h"
 #include "core/column/column_vector.h"
+#include "core/field.h"
 #include "core/string_ref.h"
 #include "exprs/function/simple_function_factory.h"
+#include "runtime/exec_env.h"
+#include "storage/index/inverted/gram/gram_family.h"
+#include "storage/index/inverted/gram/regex_gram_compiler.h"
+#include "storage/index/inverted/inverted_index_iterator.h"
+#include "storage/index/inverted/inverted_index_reader.h"
 #include "util/hyperscan_util.h"
 
 namespace doris {
@@ -1105,6 +1113,161 @@ Status FunctionRegexpLike::open(FunctionContext* context,
         }
     }
     return Status::OK();
+}
+
+// R8（Unity Build）：storage 目标把多个 .cpp 合并进一个翻译单元，匿名命名空间中的
+// 同名符号会跨文件冲突；file-scope helper 一律放进本文件专属的命名空间。
+namespace like_gram_index_detail {
+
+// 前置校验：总开关 / iterator 形状 / arguments 与 data_type_with_names 形状 / LIKE 自定义
+// ESCAPE（P0 只支持默认反斜杠）/ 模式串是否为非 NULL 常量。全部通过时把模式串写入
+// *pattern 并返回 true；任何一项不满足都返回 false——调用方据此直接 return OK()，不写
+// bitmap_result（Ruling R26：索引侧不适用只能导致不加速，不能报错）。
+bool check_preconditions(bool is_like, const ColumnsWithTypeAndName& arguments,
+                         const std::vector<IndexFieldNameAndTypePair>& data_type_with_names,
+                         const std::vector<segment_v2::IndexIterator*>& iterators,
+                         std::string* pattern) {
+    if (!config::enable_gram_index_regexp) {
+        VLOG_DEBUG << "gram index push-down skipped: enable_gram_index_regexp is false";
+        return false;
+    }
+    if (iterators.size() != 1 || iterators[0] == nullptr) {
+        VLOG_DEBUG << "gram index push-down skipped: unsupported iterators shape (size="
+                   << iterators.size() << ")";
+        return false;
+    }
+    if (arguments.empty() || data_type_with_names.size() != 1) {
+        VLOG_DEBUG << "gram index push-down skipped: unsupported arguments/column shape";
+        return false;
+    }
+    if (is_like && arguments.size() >= 2) {
+        Field escape_field;
+        arguments[1].column->get(0, escape_field);
+        if (escape_field.is_null() || escape_field.get<TYPE_STRING>() != "\\") {
+            VLOG_DEBUG << "gram index push-down skipped: custom LIKE ESCAPE is not supported";
+            return false;
+        }
+    }
+    if (!is_column_const(*arguments[0].column)) {
+        VLOG_DEBUG << "gram index push-down skipped: pattern column is not constant";
+        return false;
+    }
+    Field pattern_field;
+    arguments[0].column->get(0, pattern_field);
+    if (pattern_field.is_null()) {
+        VLOG_DEBUG << "gram index push-down skipped: pattern is NULL";
+        return false;
+    }
+    *pattern = pattern_field.get<TYPE_STRING>();
+    return true;
+}
+
+// 从 iterator 的 FULLTEXT reader 属性解析 gram 方案。返回 nullopt 的情形：没有 FULLTEXT
+// reader、reader 不是 InvertedIndexReader（理论上不会发生，防御性判断）、
+// resolve_gram_scheme 判定不是 gram 族、或策略管理器因策略缺失而抛出异常——一律视为
+// “这个索引用不了 gram 加速”，而不是查询错误。
+std::optional<segment_v2::gram::GramScheme> resolve_scheme(segment_v2::IndexIterator* iter) {
+    auto reader = iter->get_reader(segment_v2::InvertedIndexReaderType::FULLTEXT);
+    if (reader == nullptr) {
+        VLOG_DEBUG << "gram index push-down skipped: no FULLTEXT reader";
+        return std::nullopt;
+    }
+    auto* inverted_reader = dynamic_cast<segment_v2::InvertedIndexReader*>(reader.get());
+    if (inverted_reader == nullptr) {
+        VLOG_DEBUG << "gram index push-down skipped: reader is not an InvertedIndexReader";
+        return std::nullopt;
+    }
+    try {
+        auto scheme =
+                segment_v2::gram::resolve_gram_scheme(inverted_reader->get_index_properties(),
+                                                      ExecEnv::GetInstance()->index_policy_mgr());
+        if (!scheme.has_value()) {
+            VLOG_DEBUG << "gram index push-down skipped: index is not a gram-family analyzer";
+        }
+        return scheme;
+    } catch (const Exception& e) {
+        VLOG_DEBUG << "gram index push-down skipped: gram scheme resolution threw: " << e.what();
+        return std::nullopt;
+    } catch (const std::exception& e) {
+        VLOG_DEBUG << "gram index push-down skipped: gram scheme resolution threw: " << e.what();
+        return std::nullopt;
+    }
+}
+
+// 编译 pattern 为 GramQuery 并向 iterator 下发 GRAM_BOOLEAN_QUERY。编译器内部失败、编译
+// 结果为 ALL（gram_index_uncompilable，计数留给 Task 11）、以及 read_from_index 返回的一组
+// 已知“该降级”的错误码，都折叠成 OK 且不写 *bitmap_result；其余错误原样返回（例如参数非法
+// 这种真正意外的错误——SegmentIterator 会据此中止查询而不是静默吞掉）。
+Status dispatch_query(bool is_like, const segment_v2::gram::GramScheme& scheme,
+                      const std::string& pattern, segment_v2::IndexIterator* iter,
+                      const IndexFieldNameAndTypePair& data_type_with_name, uint32_t num_rows,
+                      segment_v2::InvertedIndexResultBitmap* bitmap_result) {
+    segment_v2::gram::RegexGramCompiler compiler(scheme);
+    segment_v2::gram::GramQuery query;
+    Status compile_status = is_like ? compiler.compile_like(pattern, &query)
+                                    : compiler.compile_regexp(pattern, &query);
+    if (!compile_status.ok()) {
+        // compile_* 的约定是只在内部断言失败时才返回非 OK；即便如此，索引侧的问题也只能
+        // 降级为不加速，绝不能让 LIKE/REGEXP 查询因此报错。
+        VLOG_DEBUG << "gram index push-down skipped: compiler returned " << compile_status;
+        return Status::OK();
+    }
+    if (query.is_all()) {
+        VLOG_DEBUG << "gram index push-down skipped: compiled gram query is ALL";
+        return Status::OK();
+    }
+
+    segment_v2::InvertedIndexParam param;
+    param.column_name = data_type_with_name.first;
+    param.column_type = data_type_with_name.second;
+    param.query_value = Field::create_field<TYPE_STRING>(query.serialize());
+    param.query_type = segment_v2::InvertedIndexQueryType::GRAM_BOOLEAN_QUERY;
+    param.num_rows = num_rows;
+    param.roaring = std::make_shared<roaring::Roaring>();
+
+    Status query_status = iter->read_from_index(&param);
+    if (!query_status.ok()) {
+        if (query_status.is<ErrorCode::INVERTED_INDEX_NOT_SUPPORTED>() ||
+            query_status.is<ErrorCode::NOT_IMPLEMENTED_ERROR>() ||
+            query_status.is<ErrorCode::INVERTED_INDEX_EVALUATE_SKIPPED>() ||
+            query_status.is<ErrorCode::INVERTED_INDEX_FILE_NOT_FOUND>() ||
+            query_status.is<ErrorCode::INVERTED_INDEX_BYPASS>()) {
+            // CLucene 格式旧段 / reader 不识别 GRAM_BOOLEAN_QUERY / 命中已达上限等：不加速。
+            VLOG_DEBUG << "gram index push-down skipped: read_from_index returned " << query_status;
+            return Status::OK();
+        }
+        return query_status;
+    }
+
+    segment_v2::InvertedIndexResultBitmap result(param.roaring, nullptr);
+    result.set_approximate(true);
+    *bitmap_result = result;
+    return Status::OK();
+}
+
+} // namespace like_gram_index_detail
+
+Status FunctionLikeBase::evaluate_gram_index(
+        GramCompileKind kind, const ColumnsWithTypeAndName& arguments,
+        const std::vector<IndexFieldNameAndTypePair>& data_type_with_names,
+        std::vector<segment_v2::IndexIterator*> iterators, uint32_t num_rows,
+        segment_v2::InvertedIndexResultBitmap& bitmap_result) const {
+    const bool is_like = (kind == GramCompileKind::LIKE);
+
+    std::string pattern;
+    if (!like_gram_index_detail::check_preconditions(is_like, arguments, data_type_with_names,
+                                                     iterators, &pattern)) {
+        return Status::OK();
+    }
+
+    auto* iter = iterators[0];
+    auto scheme = like_gram_index_detail::resolve_scheme(iter);
+    if (!scheme.has_value()) {
+        return Status::OK();
+    }
+
+    return like_gram_index_detail::dispatch_query(
+            is_like, *scheme, pattern, iter, data_type_with_names[0], num_rows, &bitmap_result);
 }
 
 void register_function_like(SimpleFunctionFactory& factory) {

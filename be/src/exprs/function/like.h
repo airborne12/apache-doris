@@ -373,6 +373,20 @@ protected:
     // hyperscan compile expression to database and allocate scratch space
     static Status hs_prepare(FunctionContext* context, const char* expression,
                              hs_database_t** database, hs_scratch_t** scratch);
+
+    // gram 索引下推入口，LIKE / REGEXP 共用；两者仅编译方式不同（LIKE 按 %/_ 切字面量段，
+    // REGEXP 走正则语法树），其余流程（方案解析、下发 GRAM_BOOLEAN_QUERY、近似标记）完全一致。
+    //
+    // 语义硬约束（Ruling R26）：索引只能产生超集候选，任何索引侧失败或不适用场景都只能
+    // 导致“不加速”——一律直接 return OK() 且不写 bitmap_result，绝不能让 LIKE/REGEXP 查询
+    // 因为索引侧的问题而报错或结果变化。具体到每种情形（开关关闭、iterator/参数形状不对、
+    // 模式串非常量或为 NULL、LIKE 自定义 ESCAPE、非 gram 族索引、gram 编译器内部失败、
+    // 编译结果为 ALL、read_from_index 返回的一组已知“不支持/跳过”错误码）见 like.cpp 的实现。
+    enum class GramCompileKind { LIKE, REGEXP };
+    Status evaluate_gram_index(GramCompileKind kind, const ColumnsWithTypeAndName& arguments,
+                               const std::vector<IndexFieldNameAndTypePair>& data_type_with_names,
+                               std::vector<segment_v2::IndexIterator*> iterators, uint32_t num_rows,
+                               segment_v2::InvertedIndexResultBitmap& bitmap_result) const;
 };
 
 class FunctionLike : public FunctionLikeBase {
@@ -395,6 +409,16 @@ public:
     friend struct VectorSubStringSearchState;
     friend struct VectorStartsWithSearchState;
     friend struct VectorEndsWithSearchState;
+
+    Status evaluate_inverted_index(
+            const ColumnsWithTypeAndName& arguments,
+            const std::vector<IndexFieldNameAndTypePair>& data_type_with_names,
+            std::vector<segment_v2::IndexIterator*> iterators, uint32_t num_rows,
+            const InvertedIndexAnalyzerCtx* analyzer_ctx,
+            segment_v2::InvertedIndexResultBitmap& bitmap_result) const override {
+        return evaluate_gram_index(GramCompileKind::LIKE, arguments, data_type_with_names,
+                                   iterators, num_rows, bitmap_result);
+    }
 
 private:
     static Status like_fn(const LikeSearchState* state, const ColumnString& val,
@@ -419,6 +443,16 @@ public:
     String get_name() const override { return name; }
 
     Status open(FunctionContext* context, FunctionContext::FunctionStateScope scope) override;
+
+    Status evaluate_inverted_index(
+            const ColumnsWithTypeAndName& arguments,
+            const std::vector<IndexFieldNameAndTypePair>& data_type_with_names,
+            std::vector<segment_v2::IndexIterator*> iterators, uint32_t num_rows,
+            const InvertedIndexAnalyzerCtx* analyzer_ctx,
+            segment_v2::InvertedIndexResultBitmap& bitmap_result) const override {
+        return evaluate_gram_index(GramCompileKind::REGEXP, arguments, data_type_with_names,
+                                   iterators, num_rows, bitmap_result);
+    }
 };
 
 } // namespace doris

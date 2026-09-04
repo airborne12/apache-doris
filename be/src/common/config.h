@@ -1385,6 +1385,10 @@ DECLARE_mBool(enable_common_grams_index_build);
 DECLARE_mInt32(common_grams_plan_cost_ratio_percent);
 DECLARE_mInt32(common_grams_position_verify_factor);
 
+// LIKE/REGEXP 是否尝试把常量模式串编译为 gram 布尔查询下推到 gram 族倒排索引（总开关）；
+// 关闭时行为等价于该索引不存在——只是不加速，不影响查询结果。
+DECLARE_mBool(enable_gram_index_regexp);
+
 // condition cache limit
 DECLARE_Int16(condition_cache_limit);
 
