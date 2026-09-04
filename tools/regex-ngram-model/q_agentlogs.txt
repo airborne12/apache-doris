@@ -1,0 +1,45 @@
+# agentlogs（agent 观测日志，中英混排长文本）验收查询集
+# 每行一条正则；`#` 开头为注释。选择率覆盖 ≈0.0007 %（反例线索）到 ≈37 %（^\{"cwd"）。
+# 目标列：gram_bench.al.input
+
+# --- 纯中文短语（2~5 字）---
+任务主题
+上下文主题
+保留最近一次
+高信号证据
+反例线索
+
+# --- 中英混排（含全角冒号）---
+分类：coding_devops
+意图：estimate_tokens
+display_text":"检索"
+
+# --- .* 跨段桥接 ---
+检索.*证据
+任务主题.*租户
+
+# --- key=value + 字符类 ---
+rid=[0-9a-f]{4}
+窗口=[0-9a-f]{4}/[0-9a-f]{4}
+latency_ms=[0-9]{4}
+tenant_01[0-8]
+
+# --- 交替 ---
+phase=(direct_count_tokens|direct_generation_input)
+mcp__matrix__(deploy|deploy_service)_[0-9]\.md
+
+# --- 锚点 ---
+^\{"cwd"
+
+# --- 转义点 ---
+replay_[0-9a-f]{4}\.snapshot
+
+# --- 长字面量 ---
+retry budget depleted
+unable to open /workspace/artifacts
+mcp__matrix__vector_search
+
+# --- 刻意构造的不可索引查询（大小写不敏感 / 纯数字类）---
+(?i)guardrail
+(?i)snapshot
+[0-9]{4}
