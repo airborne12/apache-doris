@@ -450,6 +450,18 @@ CREATE INVERTED INDEX TOKENIZER gram_log PROPERTIES(
   "density" = "0.25", "stop_gram_df" = "0.10"); -- p 与 τ
 ```
 
+参数与取值域（FE `NGramTokenizerValidator` 与 BE `gram/gram_scheme.cpp::from_properties` 逐条一致；FE 在 DDL 阶段就拒掉越界值，不把错误留到写入时才由 BE 报 `InvalidArgument`）：
+
+| 参数 | 取值域 | 默认 | 说明 |
+|---|---|---|---|
+| `mode` | `auto` / `sparse` / `dense` | 不写 = legacy ngram（见下方兼容性） | 写了才进入 gram 族。**严格小写、不 trim**：`"SPARSE"`、`" sparse "` 一律报错——BE 做的是精确字符串比较，FE 若归一化就会与落盘的策略属性不一致 |
+| `min_gram` | 整数 `[1, 64]` | 3 | 稀疏模式下即 n；必须 ≤ `max_gram` |
+| `max_gram` | 整数 `[1, 256]` | 16 | 稀疏模式下即 L |
+| `density` | 小数 `[0.001, 1]` | 0.25 | 边界密度 p；BE 按千分比整数落盘，故下界是 0.001 而不是 0 |
+| `stop_gram_df` | 小数 `[0, 1]` | 0.10（P0 未实现裁剪，等价 τ=0，见 §6.1.4） | 高频 gram 阈值 τ |
+| `lower_case` | `true` / `false` | false | 提取前折叠。FE 只收 `true`/`false`（BE 另接受 `1`/`0`，取更严的一侧） |
+| `token_chars` / `custom_token_chars` | 与 `mode` 互斥，同时出现即报错 | — | gram 族按脚本自适应切分（§6.1.1），不接受字符类配置 |
+
 兼容性（P0 已实现的形态，Ruling R34）：内置 `ngram` tokenizer 的默认行为（`min_gram=1`、`max_gram=2`、码点级、产出全部长度）保持不变，直接在 ANALYZER 里写 `"tokenizer"="ngram"` 的老用法仍是老行为，且**在任何存储格式上都不受影响**。**是否进入 gram 族只看有没有显式写 `mode`**：`mode` 缺省 → 不是 gram 族，索引照旧、也**不会**自动获得 LIKE/REGEXP 加速（原设计设想的「老索引自动提速」在 P0 未采纳——`GramExtractor` 与 legacy 滑窗的产出并不等价，凭 legacy 参数编译会漏行）；写了 `mode`（含 `mode=dense`）→ 进入 gram 族，此时必须 `inverted_index_storage_format = SNII`（§6.7）。想让老表提速，需要新建一个带 `mode` 的 tokenizer / analyzer 并重建索引。
 
 一个正确性约束：gram 族下的大小写折叠必须发生在**边界哈希之前**（相当于 char filter 阶段），否则查询字面量与数据的大小写不同时边界位置不同、gram 不同，会漏结果。因此折叠开关是 `ngram` **tokenizer 自己的属性** `lower_case`（提取前对输入折叠），而不是索引级属性——索引级 `lower_case` 只对内置 parser 生效，对自定义 analyzer（含 gram 族）不起作用，写在 `INDEX ... PROPERTIES` 里不会有任何效果。
@@ -684,6 +696,8 @@ CREATE INVERTED INDEX TOKENIZER gram_log PROPERTIES(
 | B4 | 三张表的 `index_size / raw_column_bytes`（**分母口径见下方勘误**） | 日志与 CJK 表 ≤ 30%；URL 表 ≤ 45%（稠密）或 ≤ 25%（稀疏） |
 | B5 | 云模式（S3 + file cache 冷）：单段单查询的远端请求次数 | 段级布隆未命中 0 次；命中 ≤ 2 次（P1） |
 | B6 | 写入吞吐：带索引 vs 不带索引 stream load | 下降 ≤ 15%（对照现有 V4 全文索引的口径） |
+
+**B1 / B3 口径勘误**：B1 原写「现有 E2E 驱动 `e2e_driver2.sh`」与开关 `enable_regex_gram_index`，两者在 P0 都不成立——驱动在 Task 16 重写为 `tools/regex-ngram-model/e2e/bench_gram_regexp.sh`，总开关落地为 BE 配置 `enable_gram_index_regexp`（§6.8：P0 没有新增任何 FE 会话变量），故本表不再绑定具体驱动名与变量名。B3 原写「247M 行」，实测只跑了 4 个文件、34,460,091 行的子集以把导入墙钟压在可接受范围内（全量 247M 未跑），故本表不再写死行数，实际口径以 §9.2.1 表内的行数为准。
 
 **B4 分母口径勘误**：本表原写 `index_disk_size / data_disk_size`，但 §4.4/§4.5/§4.7 的全部建模百分比（57%、85%、24.8%、27.1%、26.2%、41.1%…）的分母都是**原始列字节（未压缩）**，即 `tools/regex-ngram-model/ngram_model.cpp` 的 `data_bytes`，而不是 Doris 压缩后的段数据。实测「原始列字节 / 段数据」在 textbench 上是 5.2×、httplogs 上是 6.1×（后者的 `.dat` 还含另外 4 列，`request` 列本身压得更狠），两个口径差 5–6 倍，按字面口径 B4 永远不可能通过。故 B4 的分母统一按建模口径写成「原始列字节」，下表两个口径都列出。
 

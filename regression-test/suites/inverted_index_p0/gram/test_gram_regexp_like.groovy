@@ -17,6 +17,8 @@
 
 import java.util.regex.Pattern
 
+import org.apache.doris.regression.action.ProfileAction
+
 // gram（稀疏 / 稠密 ngram）索引对 LIKE / REGEXP 的加速是「近似候选超集 + 表达式复验」：
 // 索引只负责把候选行收窄，最终匹配仍由 LIKE / REGEXP 表达式逐行判定。因此本用例的核心断言是
 // **语义对照**——同一条查询在 enable_inverted_index_query=true / false 两种模式下必须返回
@@ -297,27 +299,19 @@ suite("test_gram_regexp_like", "p0") {
     sql "SET enable_inverted_index_query=true"
     sql "set enable_profile=true"
     sql "set profile_level=2"
+    // profile 由 FE 异步汇报，固定 sleep 要么白等要么在慢机器上偶发抓空。改用框架自带的有界
+    // 轮询 ProfileAction#getProfileBySql：最多等 30 s（每 500 ms 一次），直到该 SQL 的 profile
+    // 变成 "Profile Completion State: COMPLETE" 且两个 gram 计数器都已渲染出来；超时即失败。
+    def gramProfileCounters = ["RowsGramIndexFiltered", "GramIndexCandidateRows"]
+    def profileAction = new ProfileAction(context)
     // REGEXP 走 gram 加速
-    profile("gram_regexp_profile") {
-        run {
-            order_qt_profile_q "/* gram_regexp_profile */ SELECT id FROM ${tbl} WHERE msg REGEXP 'context deadline exceeded'"
-            // 等待 FE 侧 profile 汇报完成后再抓取
-            sleep(5000)
-        }
-        check { profileString, exception ->
-            checkGramPruned("regexp", profileString, exception)
-        }
-    }
+    order_qt_profile_q "/* gram_regexp_profile */ SELECT id FROM ${tbl} WHERE msg REGEXP 'context deadline exceeded'"
+    checkGramPruned("regexp",
+            profileAction.getProfileBySql("gram_regexp_profile", gramProfileCounters), null)
     // LIKE 同样走 gram 加速
-    profile("gram_like_profile") {
-        run {
-            order_qt_profile_q_like "/* gram_like_profile */ SELECT id FROM ${tbl} WHERE msg LIKE '%Sending Quote%'"
-            sleep(5000)
-        }
-        check { profileString, exception ->
-            checkGramPruned("like", profileString, exception)
-        }
-    }
+    order_qt_profile_q_like "/* gram_like_profile */ SELECT id FROM ${tbl} WHERE msg LIKE '%Sending Quote%'"
+    checkGramPruned("like",
+            profileAction.getProfileBySql("gram_like_profile", gramProfileCounters), null)
     sql "set enable_profile=false"
 
     // 删除后再查：delete 谓词与 gram 候选位图叠加后仍必须与不走索引一致
