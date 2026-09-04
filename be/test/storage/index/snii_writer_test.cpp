@@ -44,6 +44,7 @@
 #include "storage/index/inverted/common_grams/common_grams_key_codec.h"
 #include "storage/index/inverted/common_grams/common_grams_segment_metadata.h"
 #include "storage/index/inverted/common_grams/common_word_set.h"
+#include "storage/index/inverted/gram/gram_family.h"
 #include "storage/index/snii/common/slice.h"
 #include "storage/index/snii/encoding/byte_sink.h"
 #include "storage/index/snii/format/dict_block.h"
@@ -67,6 +68,7 @@ namespace {
 using doris::snii::ByteSink;
 using doris::snii::Slice;
 using namespace doris::snii::format; // NOLINT(google-build-using-namespace)
+namespace gram = doris::segment_v2::gram;
 
 class ScopedCommonGramsPolicies {
 public:
@@ -118,6 +120,46 @@ private:
     doris::IndexPolicyMgr* previous_ = nullptr;
 };
 
+// 注入一个 gram 族（ngram tokenizer + mode=sparse）的 tokenizer/analyzer 策略对，
+// 与 ScopedCommonGramsPolicies 同样的“替换再还原” ExecEnv::_index_policy_mgr 手法，
+// 供 gram 族识别 + SNII 写入器强制 docs-only 的测试使用。
+class ScopedGramPolicies {
+public:
+    ScopedGramPolicies() {
+        auto* exec_env = doris::ExecEnv::GetInstance();
+        previous_ = exec_env->index_policy_mgr();
+        exec_env->_index_policy_mgr = &manager_;
+
+        // IndexPolicyMgr 的 _name_to_id 是不分策略类型的单一命名空间（apply_policy_changes
+        // 按名字去重，后到者若与已有名字冲突会被整个拒绝，见 index_policy_mgr.cpp:86-92）。
+        // tokenizer 和 analyzer 因此不能同名，故 tokenizer 用独立的
+        // "gram_sparse_tokenizer"，analyzer 保留 "gram_sparse"（索引 analyzer 属性引用的
+        // 正是这个名字）。
+        doris::TIndexPolicy tokenizer;
+        tokenizer.id = 9001;
+        tokenizer.name = "gram_sparse_tokenizer";
+        tokenizer.type = doris::TIndexPolicyType::TOKENIZER;
+        tokenizer.properties["type"] = "ngram";
+        tokenizer.properties["mode"] = "sparse";
+
+        doris::TIndexPolicy analyzer;
+        analyzer.id = 9002;
+        analyzer.name = "gram_sparse";
+        analyzer.type = doris::TIndexPolicyType::ANALYZER;
+        analyzer.properties["tokenizer"] = "gram_sparse_tokenizer";
+
+        manager_.apply_policy_changes({tokenizer, analyzer}, {});
+    }
+
+    ~ScopedGramPolicies() { doris::ExecEnv::GetInstance()->_index_policy_mgr = previous_; }
+
+    doris::IndexPolicyMgr& manager() { return manager_; }
+
+private:
+    doris::IndexPolicyMgr manager_;
+    doris::IndexPolicyMgr* previous_ = nullptr;
+};
+
 // A fatal assertion inside a helper FUNCTION only aborts the helper; the calling
 // test keeps running and may dereference state that failed to initialize (this
 // bit us as a null-analyzer SEGV). A macro expands in the test body, so the
@@ -160,6 +202,21 @@ void init_common_grams_index_meta(doris::TabletIndex* index_meta, int64_t index_
     index_pb.add_col_unique_id(0);
     index_pb.mutable_properties()->insert({"analyzer", ScopedCommonGramsPolicies::analyzer_name()});
     index_pb.mutable_properties()->insert({"support_phrase", "true"});
+    index_meta->init_from_pb(index_pb);
+}
+
+// 通用 index_meta 构造：把任意属性表塞进一个新建的 TabletIndex，供 gram 族识别测试直接
+// 传入自定义 properties（而不是像上面两个专用 helper 那样把属性硬编码在函数体内）。
+void init_gram_index_meta(doris::TabletIndex* index_meta, int64_t index_id,
+                          const std::map<std::string, std::string>& properties) {
+    doris::TabletIndexPB index_pb;
+    index_pb.set_index_type(doris::IndexType::INVERTED);
+    index_pb.set_index_id(index_id);
+    index_pb.set_index_name("gram_family_writer");
+    index_pb.add_col_unique_id(0);
+    for (const auto& [key, value] : properties) {
+        index_pb.mutable_properties()->insert({key, value});
+    }
     index_meta->init_from_pb(index_pb);
 }
 
@@ -503,6 +560,58 @@ TEST(SniiCommonGramsWriter, PlainControlKeepsRawTermsAndLegacyConfig) {
     EXPECT_EQ(writer.config_for_test(), IndexConfig::kDocsPositions);
     EXPECT_TRUE(writer.encoded_norms_for_test().empty());
     EXPECT_FALSE(writer.has_common_grams_metadata_seed_for_test());
+}
+
+// gram 族（ngram tokenizer + mode=sparse）analyzer 必须被 resolve_gram_scheme 识别，
+// 且 SniiIndexColumnWriter::init() 必须无视 support_phrase=true、强制转为 docs-only：
+// gram 索引不支持短语位置。同时验证写入的 term 与落地的 GramExtractor 产出的 gram 完全一致
+// （行不变式：gram 族索引的 term 就是抽取器切出的 gram，不多不少）。
+TEST(SniiWriterTest, GramTokenizerForcesDocsOnlyAndIsRecognised) {
+    ScopedGramPolicies policies;
+
+    const std::map<std::string, std::string> props {{"analyzer", "gram_sparse"},
+                                                    {"support_phrase", "true"}}; // 故意要位置
+    doris::TabletIndex index_meta;
+    init_gram_index_meta(&index_meta, 9010, props);
+
+    auto scheme = gram::resolve_gram_scheme(index_meta.properties(), &policies.manager());
+    ASSERT_TRUE(scheme.has_value());
+    EXPECT_EQ(scheme->mode, gram::GramMode::SPARSE);
+
+    doris::segment_v2::SniiIndexColumnWriter writer(nullptr, &index_meta,
+                                                    doris::FieldType::OLAP_FIELD_TYPE_VARCHAR);
+    ASSERT_OK(writer.init());
+    // gram 族强制 docs-only，忽略 support_phrase。
+    EXPECT_EQ(writer.config_for_test(), IndexConfig::kDocsOnly);
+    ASSERT_TRUE(writer.gram_scheme_for_test().has_value());
+    EXPECT_TRUE(writer.gram_scheme_for_test().value() == *scheme);
+
+    const std::vector<doris::Slice> values {doris::Slice("rpc error: code = Unavailable"),
+                                            doris::Slice("手机微博")};
+    ASSERT_OK(writer.add_values("c", values.data(), values.size()));
+    auto postings = writer.term_buffer_for_test()->finalize_sorted();
+    std::vector<std::string> terms;
+    terms.reserve(postings.size());
+    for (auto& posting : postings) {
+        terms.push_back(posting.term);
+    }
+    std::ranges::sort(terms);
+    std::vector<std::string> expected {" Unavai", "ailable", "cod", "ode = U", "or: co",
+                                       "博",      "微",      "手",  "机"};
+    std::ranges::sort(expected);
+    EXPECT_EQ(terms, expected);
+}
+
+// 非 gram 族（内置 parser="english"，无 analyzer/normalizer 属性）必须解析不出方案，
+// 且无论进程里当前的 IndexPolicyMgr 是否为空都要成立（resolve_gram_scheme 对 mgr==nullptr
+// 与「analyzer 名为空」两种情况都直接短路返回 nullopt，不依赖策略管理器是否已初始化）。
+TEST(SniiWriterTest, NonGramAnalyzerHasNoScheme) {
+    const std::map<std::string, std::string> props {{"parser", "english"}};
+    doris::TabletIndex index_meta;
+    init_gram_index_meta(&index_meta, 9011, props);
+    EXPECT_FALSE(gram::resolve_gram_scheme(index_meta.properties(),
+                                           doris::ExecEnv::GetInstance()->index_policy_mgr())
+                         .has_value());
 }
 
 TEST(SniiDocIdSinkGrowth, AppendRangeGrowsGeometrically) {

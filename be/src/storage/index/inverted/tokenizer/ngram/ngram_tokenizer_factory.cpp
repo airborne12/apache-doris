@@ -25,26 +25,38 @@ namespace doris::segment_v2::inverted_index {
 
 std::unordered_map<std::string, CharMatcherPtr> NGramTokenizerFactory::MATCHERS;
 
-void NGramTokenizerFactory::initialize(const Settings& settings) {
+Status NGramTokenizerFactory::parse_gram_scheme(const Settings& settings,
+                                                std::optional<gram::GramScheme>* out) {
+    out->reset();
     // "mode" 出现即进入 gram 族（sparse|dense|auto），与 legacy ngram 的滑窗窗口互斥；
     // gram 族的方案解析、校验全部委托给 GramScheme::from_properties，这里只负责把
-    // tokenizer 属性透传过去、补齐 gram 族自己的默认 min/max_gram，然后提前返回。
-    if (!settings.get_string("mode").empty()) {
-        std::map<std::string, std::string> props;
-        for (const auto& [k, v] : settings.sorted_entries()) {
-            props.emplace(k, v);
-        }
-        if (!props.contains("min_gram")) {
-            props["min_gram"] = "3"; // gram 族默认值不同于 legacy 的 1/2
-        }
-        if (!props.contains("max_gram")) {
-            props["max_gram"] = "16";
-        }
-        gram::GramScheme scheme;
-        Status st = gram::GramScheme::from_properties(props, &scheme);
-        if (!st.ok()) {
-            throw Exception(ErrorCode::INVALID_ARGUMENT, "ngram tokenizer: {}", st.to_string());
-        }
+    // tokenizer 属性透传过去、补齐 gram 族自己的默认 min/max_gram。
+    if (settings.get_string("mode").empty()) {
+        return Status::OK();
+    }
+    std::map<std::string, std::string> props;
+    for (const auto& [k, v] : settings.sorted_entries()) {
+        props.emplace(k, v);
+    }
+    if (!props.contains("min_gram")) {
+        props["min_gram"] = "3"; // gram 族默认值不同于 legacy 的 1/2
+    }
+    if (!props.contains("max_gram")) {
+        props["max_gram"] = "16";
+    }
+    gram::GramScheme scheme;
+    RETURN_IF_ERROR(gram::GramScheme::from_properties(props, &scheme));
+    *out = scheme;
+    return Status::OK();
+}
+
+void NGramTokenizerFactory::initialize(const Settings& settings) {
+    std::optional<gram::GramScheme> scheme;
+    Status st = parse_gram_scheme(settings, &scheme);
+    if (!st.ok()) {
+        throw Exception(ErrorCode::INVALID_ARGUMENT, "ngram tokenizer: {}", st.to_string());
+    }
+    if (scheme.has_value()) {
         _gram_scheme = scheme;
         return; // 跳过 legacy 的 max-min>1 校验与 token_chars 解析
     }

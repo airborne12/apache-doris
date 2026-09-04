@@ -19,6 +19,7 @@
 
 #include <optional>
 
+#include "common/status.h"
 #include "storage/index/inverted/gram/gram_scheme.h"
 #include "storage/index/inverted/setting.h"
 #include "storage/index/inverted/tokenizer/ngram/char_matcher.h"
@@ -67,6 +68,12 @@ public:
 
     static void initialize_matchers();
     static CharMatcherPtr parse_token_chars(const Settings& settings);
+
+    // 把 tokenizer Settings 映射为 GramScheme：这是该映射关系的唯一真源，initialize() 与
+    // CustomAnalyzerProvider（gram/gram_family.h 的使用方）都必须调用它，不得各自复制一份
+    // 属性解析逻辑（R16 DRY）。"mode" 缺省时 *out 置为 nullopt 并返回 OK（legacy ngram）；
+    // 出现非法取值（如未知的 mode、越界的 min/max_gram）时返回 InvalidArgument，*out 保持 nullopt。
+    static Status parse_gram_scheme(const Settings& settings, std::optional<gram::GramScheme>* out);
 
 private:
     static std::unordered_map<std::string, CharMatcherPtr> MATCHERS;

@@ -27,9 +27,11 @@
 #include "common/cast_set.h"
 #include "common/config.h"
 #include "common/logging.h"
+#include "runtime/exec_env.h"
 #include "storage/index/index_file_writer.h"
 #include "storage/index/inverted/analyzer/analyzer.h"
 #include "storage/index/inverted/common_grams/common_grams_key_codec.h"
+#include "storage/index/inverted/gram/gram_family.h"
 #include "storage/index/inverted/query/query_info.h"
 #include "storage/index/inverted/token_filter/common_grams_filter.h"
 #include "storage/index/snii/query/bm25_scorer.h"
@@ -75,6 +77,27 @@ Status SniiIndexColumnWriter::init() {
                      INVERTED_INDEX_PARSER_PHRASE_SUPPORT_YES;
     _config = _has_positions ? ::doris::snii::format::IndexConfig::kDocsPositions
                              : ::doris::snii::format::IndexConfig::kDocsOnly;
+    // gram 族（ngram tokenizer + mode 属性）识别必须在 SpimiTermBuffer 按 _has_positions
+    // 构造之前完成：一旦命中，索引强制退化为 docs-only，即使 support_phrase=true 也不例外
+    // （gram 索引不支持短语位置）。这里独立解析 analyzer 名 -> 策略 -> provider，出错时按
+    // "不是 gram 族"处理，交由下面已有的 analyzer 创建流程去暴露真正的配置错误。
+    try {
+        _gram_scheme = gram::resolve_gram_scheme(_index_meta->properties(),
+                                                 doris::ExecEnv::GetInstance()->index_policy_mgr());
+    } catch (const CLuceneError& e) {
+        return Status::Error<ErrorCode::INVERTED_INDEX_ANALYZER_ERROR>(
+                "SNII resolve gram scheme failed: {}", e.what());
+    } catch (const Exception& e) {
+        return Status::Error<ErrorCode::INVERTED_INDEX_ANALYZER_ERROR>(
+                "SNII resolve gram scheme failed: {}", e.what());
+    }
+    if (_gram_scheme.has_value() && _has_positions) {
+        LOG(INFO) << "gram-family analyzer forces docs-only index, ignoring support_phrase for "
+                     "index "
+                  << _index_meta->index_id();
+        _has_positions = false;
+        _config = ::doris::snii::format::IndexConfig::kDocsOnly;
+    }
     auto ignore_above_value =
             get_parser_ignore_above_value_from_properties(_index_meta->properties());
     _ignore_above = cast_set<uint32_t>(std::stoul(ignore_above_value));

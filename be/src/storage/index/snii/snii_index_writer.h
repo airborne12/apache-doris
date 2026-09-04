@@ -25,6 +25,7 @@
 
 #include "storage/index/index_writer.h"
 #include "storage/index/inverted/common_grams/common_grams_segment_metadata.h"
+#include "storage/index/inverted/gram/gram_scheme.h"
 #include "storage/index/inverted/inverted_index_parser.h"
 #include "storage/index/inverted/query/query_info.h"
 #include "storage/index/inverted/util/reader.h"
@@ -78,6 +79,7 @@ public:
     const std::vector<uint8_t>& encoded_norms_for_test() const { return _encoded_norms; }
     uint64_t scoring_token_count_for_test() const { return _scoring_token_count; }
     ::doris::snii::format::IndexConfig config_for_test() const { return _config; }
+    const std::optional<gram::GramScheme>& gram_scheme_for_test() const { return _gram_scheme; }
     bool has_common_grams_metadata_seed_for_test() const {
         return _common_grams_metadata_seed.has_value();
     }
@@ -121,6 +123,10 @@ private:
     uint32_t _ignore_above = 0;
     uint32_t _rid = 0;
     ::doris::snii::format::IndexConfig _config = ::doris::snii::format::IndexConfig::kDocsOnly;
+    // gram 族（ngram tokenizer + mode 属性）analyzer 的方案参数；由 init() 通过
+    // gram::resolve_gram_scheme 早于 term buffer 构造之前解析出来，一旦有值就强制
+    // docs-only（见 init() 内的判断）。非 gram 族索引始终为 nullopt。
+    std::optional<gram::GramScheme> _gram_scheme;
     InvertedIndexAnalyzerConfig _analyzer_config;
     inverted_index::ReaderPtr _char_string_reader;
     std::shared_ptr<lucene::analysis::Analyzer> _analyzer;
