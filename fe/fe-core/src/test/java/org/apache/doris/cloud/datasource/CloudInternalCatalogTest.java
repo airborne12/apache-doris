@@ -19,14 +19,18 @@ package org.apache.doris.cloud.datasource;
 
 import org.apache.doris.analysis.DataSortInfo;
 import org.apache.doris.catalog.ColocateTableIndex;
+import org.apache.doris.catalog.Column;
 import org.apache.doris.catalog.Database;
 import org.apache.doris.catalog.Env;
+import org.apache.doris.catalog.Index;
 import org.apache.doris.catalog.KeysType;
 import org.apache.doris.catalog.MaterializedIndex;
 import org.apache.doris.catalog.OlapTable;
 import org.apache.doris.catalog.Partition;
 import org.apache.doris.catalog.Replica;
 import org.apache.doris.catalog.Tablet;
+import org.apache.doris.catalog.Type;
+import org.apache.doris.catalog.info.IndexType;
 import org.apache.doris.cloud.catalog.CloudReplica;
 import org.apache.doris.cloud.catalog.CloudTablet;
 import org.apache.doris.cloud.persist.UpdateCloudReplicaInfo;
@@ -128,6 +132,31 @@ public class CloudInternalCatalogTest {
         } finally {
             Config.enable_partition_inverted_index_storage_format_rollout = original;
         }
+    }
+
+    @Test
+    public void testCreateTabletMetaKeepsIndexBindingOnShadowColumn() throws Exception {
+        Tablet tablet = Mockito.mock(Tablet.class);
+        Replica replica = Mockito.mock(Replica.class);
+        Mockito.when(tablet.getId()).thenReturn(100L);
+        Mockito.when(tablet.getReplicas()).thenReturn(Collections.singletonList(replica));
+        Mockito.when(replica.getId()).thenReturn(200L);
+
+        // A type-changing MODIFY COLUMN builds the target tablet from a schema whose column carries the
+        // shadow prefix, while the index still names the original column.
+        Column key = new Column("id", Type.INT);
+        key.setUniqueId(0);
+        Column shadowBody = new Column(Column.SHADOW_NAME_PREFIX + "body", Type.INT);
+        shadowBody.setUniqueId(1);
+        Index index = new Index(5L, "ix_body", Collections.singletonList("body"), IndexType.INVERTED,
+                Collections.emptyMap(), "");
+
+        OlapFile.TabletMetaCloudPB tabletMeta = createTabletMeta(tablet, TCompressionType.LZ4F,
+                Collections.singletonList(index), Arrays.asList(key, shadowBody));
+
+        Assertions.assertEquals(1, tabletMeta.getSchema().getIndexCount());
+        Assertions.assertEquals(Collections.singletonList(1),
+                tabletMeta.getSchema().getIndex(0).getColUniqueIdList());
     }
 
     @Test
@@ -315,9 +344,14 @@ public class CloudInternalCatalogTest {
 
     private OlapFile.TabletMetaCloudPB createTabletMeta(Tablet tablet, TCompressionType compressionType)
             throws Exception {
+        return createTabletMeta(tablet, compressionType, Collections.emptyList(), Collections.emptyList());
+    }
+
+    private OlapFile.TabletMetaCloudPB createTabletMeta(Tablet tablet, TCompressionType compressionType,
+            List<Index> indexes, List<Column> schemaColumns) throws Exception {
         return new CloudInternalCatalog().createTabletMetaBuilder(
                 1L, 2L, 3L, tablet, TTabletType.TABLET_TYPE_DISK, 23, KeysType.DUP_KEYS, (short) 1,
-                Collections.emptySet(), 0.05, Collections.emptyList(), Collections.emptyList(),
+                Collections.emptySet(), 0.05, indexes, schemaColumns,
                 new DataSortInfo(TSortType.LEXICAL, 0), compressionType, TStorageFormat.DEFAULT,
                 "", false, false,
                 "table", 0L, false, false, 17, null, "size_based",
