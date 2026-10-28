@@ -47,6 +47,12 @@ Status decode_varint64(const uint8_t* p, const uint8_t* end, uint64_t* v, const 
     int shift = 0;
     while (p < end) {
         uint8_t b = *p++;
+        // The tenth byte only has room for bit 63. A higher payload bit would be shifted out of the
+        // result, and the encoding would decode to a silently truncated value.
+        if (shift == 63 && (b & 0x7E) != 0) {
+            return Status::Error<ErrorCode::INVERTED_INDEX_FILE_CORRUPTED, false>(
+                    "varint64 overflow");
+        }
         result |= static_cast<uint64_t>(b & 0x7F) << shift;
         if ((b & 0x80) == 0) {
             *v = result;

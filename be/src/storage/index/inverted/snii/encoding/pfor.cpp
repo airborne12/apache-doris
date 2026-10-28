@@ -347,6 +347,23 @@ Status bitunpack(ByteSource* src, size_t n, uint8_t w, uint32_t* out) {
     return Status::OK();
 }
 
+// Advances the running exception index by an untrusted delta. The encoder writes strictly ascending
+// indices, the first as a delta from 0, so a zero delta after the first one is damage, and so is a
+// delta that does not fit in the room left below n. The room is tested before the addition: a
+// 32-bit sum could otherwise wrap back into range and pass as a valid index.
+Status advance_exception_index(uint32_t* idx, uint32_t delta, bool first, size_t n) {
+    if (delta >= n - *idx) {
+        return Status::Error<ErrorCode::INVERTED_INDEX_FILE_CORRUPTED, false>(
+                "pfor exception index out of range");
+    }
+    if (!first && delta == 0) {
+        return Status::Error<ErrorCode::INVERTED_INDEX_FILE_CORRUPTED, false>(
+                "pfor exception index not ascending");
+    }
+    *idx += delta;
+    return Status::OK();
+}
+
 } // namespace
 
 namespace testing {
@@ -424,11 +441,7 @@ Status pfor_decode(ByteSource* src, size_t n, uint32_t* out) {
         uint32_t d, val;
         RETURN_IF_ERROR(src->get_varint32(&d));
         RETURN_IF_ERROR(src->get_varint32(&val));
-        idx += d;
-        if (idx >= n) {
-            return Status::Error<ErrorCode::INVERTED_INDEX_FILE_CORRUPTED, false>(
-                    "pfor exception index out of range");
-        }
+        RETURN_IF_ERROR(advance_exception_index(&idx, d, i == 0, n));
         out[idx] = val;
     }
     return Status::OK();
@@ -448,11 +461,7 @@ Status pfor_skip(ByteSource* src, size_t n) {
         uint32_t val = 0;
         RETURN_IF_ERROR(src->get_varint32(&d));
         RETURN_IF_ERROR(src->get_varint32(&val));
-        idx += d;
-        if (idx >= n) {
-            return Status::Error<ErrorCode::INVERTED_INDEX_FILE_CORRUPTED, false>(
-                    "pfor exception index out of range");
-        }
+        RETURN_IF_ERROR(advance_exception_index(&idx, d, i == 0, n));
     }
     return Status::OK();
 }
