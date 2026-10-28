@@ -294,6 +294,15 @@ Status SniiIndexReader::_term_document_frequency(const std::string& /*column_nam
                                                  uint64_t* df, uint64_t* document_count) {
     const auto& reader = *static_cast<SniiOpenedIndex&>(index).reader;
     RETURN_IF_ERROR(::doris::snii::query::internal::check_term_outside_internal_namespace(term));
+    if (_group_slice.has_value()) {
+        // A segment group index's df is the group's; this segment's share is the term's
+        // documents inside its slice, and the slice's rows bound it.
+        RETURN_IF_ERROR(::doris::snii::query::count_only_term_df_in_range(
+                reader, term, _group_slice->offset,
+                static_cast<uint64_t>(_group_slice->offset) + _group_slice->rows, df));
+        *document_count = _group_slice->rows;
+        return Status::OK();
+    }
     RETURN_IF_ERROR(::doris::snii::query::count_only_term_df(reader, term, df));
     // The image's document count and its count of documents holding terms both bound df.
     const auto& stats = reader.stats();

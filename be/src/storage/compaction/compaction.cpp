@@ -447,7 +447,8 @@ Status Compaction::finish_merge_input_rowsets_execution(MergeInputRowsetsContext
 
     // The per-segment index files are closed by build() and the rowset is not visible yet, which
     // is the window where their indexes can be merged into segment group index files.
-    RETURN_IF_ERROR(InvertedIndexGroupBuilder::build(_output_rowset, _tablet->tablet_id()));
+    RETURN_IF_ERROR(InvertedIndexGroupBuilder::build(_output_rowset, _tablet->tablet_id(),
+                                                     std::move(_pending_index_groups)));
 
     //RETURN_IF_ERROR(_engine.meta_mgr().commit_rowset(*_output_rowset->rowset_meta().get()));
     set_delete_predicate_for_output_rowset();
@@ -1181,6 +1182,12 @@ Status Compaction::do_inverted_index_compaction() {
         }
 
         auto* rowset = find_it->second;
+        // A grouped rowset's segments have no index file of their own; its group files are
+        // opened as sources below (index_source_units).
+        if (rowset->rowset_meta()->has_inverted_index_groups()) {
+            source_rowsets[m.second] = rowset;
+            continue;
+        }
         auto seg_pos = rowset->rowset_meta()->position_of(seg_id);
         if (!seg_pos.has_value()) {
             mark_skip_index_compaction(ctx, error_handler);
@@ -1266,6 +1273,105 @@ Status Compaction::do_inverted_index_compaction() {
                 spill_threshold, snii::writer::MemoryReporter::CapPolicy::kHardLimit,
                 static_cast<uint64_t>(config::snii_postings_workspace_bytes));
     }
+    // SNII merge sources. A source is one index file: a segment's, or a group file of a grouped
+    // input rowset, whose rows are its segments' rows concatenated, so its conversion is their
+    // trans_vec entries back to back. With a segment group index output the merged indexes go
+    // straight into the group files: each output row (segment position p, rowid r) becomes
+    // (group of p, offset of p + r), so no per-segment copy is written and merged again.
+    // Example: output rows [10, 20] in one group map (1, 3) to (0, 13); an input group of two
+    // 5-row segments is one source whose rowids 0-4 and 5-9 follow those segments' entries.
+    struct SniiSource {
+        std::unique_ptr<IndexFileReader> owned_reader;
+        IndexFileReader* reader = nullptr;
+        Rowset* rowset = nullptr;
+        std::vector<uint32_t> ordinals;
+    };
+    std::vector<SniiSource> snii_sources;
+    snii::compaction::RowIdConversionMap snii_trans_vec;
+    std::vector<uint32_t> snii_destination_rows = dest_segment_num_rows;
+    if (_cur_tablet_schema->get_inverted_index_storage_format() ==
+        InvertedIndexStorageFormatPB::SNII) {
+        bool own_map = false;
+        for (const auto& rowset : _input_rowsets) {
+            auto units = index_source_units(rowset.get());
+            if (!units.has_value()) {
+                mark_skip_index_compaction(ctx, error_handler);
+                return units.error();
+            }
+            for (const IndexSourceUnit& unit : *units) {
+                SniiSource source;
+                source.rowset = rowset.get();
+                for (int64_t pos = unit.first_pos; pos < unit.first_pos + unit.segment_count;
+                     ++pos) {
+                    const auto it = src_seg_to_id_map.find(
+                            {rowset->rowset_id(), cast_set<uint32_t>(rowset->segment(pos).id())});
+                    DORIS_CHECK(it != src_seg_to_id_map.end());
+                    source.ordinals.push_back(it->second);
+                }
+                if (rowset->rowset_meta()->has_inverted_index_groups()) {
+                    own_map = true;
+                    source.owned_reader = std::make_unique<IndexFileReader>(
+                            rowset->rowset_meta()->fs(), unit.index_path_prefix,
+                            InvertedIndexStorageFormatPB::SNII, unit.file_info,
+                            _tablet->tablet_id());
+                    Status st = source.owned_reader->init(config::inverted_index_read_buffer_size);
+                    if (!st.ok()) {
+                        mark_skip_index_compaction(ctx, error_handler);
+                        return st;
+                    }
+                    source.reader = source.owned_reader.get();
+                } else {
+                    source.reader = index_file_readers[source.ordinals.front()].get();
+                }
+                snii_sources.push_back(std::move(source));
+            }
+        }
+        std::sort(snii_sources.begin(), snii_sources.end(), [](const auto& l, const auto& r) {
+            return l.ordinals.front() < r.ordinals.front();
+        });
+        uint32_t expected_ordinal = 0;
+        for (const auto& source : snii_sources) {
+            for (const uint32_t ordinal : source.ordinals) {
+                DORIS_CHECK_EQ(ordinal, expected_ordinal++);
+            }
+        }
+        DORIS_CHECK_EQ(expected_ordinal, src_segment_num);
+
+        int64_t estimated_index_bytes = 0;
+        for (const auto& rowset : _input_rowsets) {
+            estimated_index_bytes += rowset->index_disk_size();
+        }
+        _pending_index_groups = DORIS_TRY(InvertedIndexGroupBuilder::prepare(
+                *_cur_tablet_schema, ctx.fs(), ctx.segment_path(dest_segment_ids.front()),
+                dest_rowset_id.to_string(), dest_segment_num_rows, estimated_index_bytes,
+                _tablet->tablet_id()));
+        own_map = own_map || _pending_index_groups != nullptr;
+        if (own_map) {
+            snii_trans_vec.resize(snii_sources.size());
+            for (size_t i = 0; i < snii_sources.size(); ++i) {
+                for (const uint32_t ordinal : snii_sources[i].ordinals) {
+                    for (const auto& [dest_pos, dest_rowid] : trans_vec[ordinal]) {
+                        if (_pending_index_groups == nullptr ||
+                            dest_pos == std::numeric_limits<uint32_t>::max()) {
+                            snii_trans_vec[i].emplace_back(dest_pos, dest_rowid);
+                        } else {
+                            const RowsetIndexGroups& groups = _pending_index_groups->groups();
+                            snii_trans_vec[i].emplace_back(
+                                    cast_set<uint32_t>(groups.group_of(dest_pos)),
+                                    groups.offset_of(dest_pos) + dest_rowid);
+                        }
+                    }
+                }
+            }
+        }
+        if (_pending_index_groups != nullptr) {
+            const RowsetIndexGroups& groups = _pending_index_groups->groups();
+            snii_destination_rows.clear();
+            for (int32_t group_id = 0; group_id < groups.group_count(); ++group_id) {
+                snii_destination_rows.push_back(groups.group_rows(group_id));
+            }
+        }
+    }
     for (auto&& [column_uniq_id, index_metas] :
          collect_index_compaction_domain(*_cur_tablet_schema, ctx)) {
         auto col = _cur_tablet_schema->column_by_uid(column_uniq_id);
@@ -1286,16 +1392,13 @@ Status Compaction::do_inverted_index_compaction() {
                 std::vector<std::unique_ptr<snii::reader::LogicalIndexReader>> source_indexes;
                 std::vector<const snii::reader::LogicalIndexReader*> plan_sources;
                 std::vector<snii::compaction::PlainT2CompactionSource> eligibility_sources;
-                source_indexes.reserve(src_segment_num);
-                plan_sources.reserve(src_segment_num);
-                eligibility_sources.reserve(src_segment_num);
+                source_indexes.reserve(snii_sources.size());
+                plan_sources.reserve(snii_sources.size());
+                eligibility_sources.reserve(snii_sources.size());
                 Status merge_status = Status::OK();
-                for (size_t source_ordinal = 0; source_ordinal < src_segment_num;
-                     ++source_ordinal) {
-                    DORIS_CHECK(source_rowsets[source_ordinal] != nullptr);
+                for (const SniiSource& snii_source : snii_sources) {
                     const auto source_index_metas =
-                            source_rowsets[source_ordinal]->tablet_schema()->inverted_indexs(
-                                    column_uniq_id);
+                            snii_source.rowset->tablet_schema()->inverted_indexs(column_uniq_id);
                     const auto source_index_it = std::find_if(
                             source_index_metas.begin(), source_index_metas.end(),
                             [&index_meta](const TabletIndex* source_index) {
@@ -1307,7 +1410,7 @@ Status Compaction::do_inverted_index_compaction() {
                         break;
                     }
                     const TabletIndex* source_index_meta = *source_index_it;
-                    auto source_index = index_file_readers[source_ordinal]->open_snii_index(
+                    auto source_index = snii_source.reader->open_snii_index(
                             source_index_meta, nullptr,
                             snii::reader::LogicalIndexOpenMode::kCompaction);
                     if (!source_index.has_value()) {
@@ -1341,7 +1444,8 @@ Status Compaction::do_inverted_index_compaction() {
                     }
                     if (merge_status.ok()) {
                         merge_status = snii::compaction::ValidatedRowIdConversion::create(
-                                &trans_vec, source_segment_doc_counts, dest_segment_num_rows,
+                                snii_trans_vec.empty() ? &trans_vec : &snii_trans_vec,
+                                source_segment_doc_counts, snii_destination_rows,
                                 &validated_snii_rowid_conversion);
                         if (merge_status.ok()) {
                             DBUG_EXECUTE_IF("Compaction::snii_validated_rowid_conversion_created",
@@ -1360,10 +1464,11 @@ Status Compaction::do_inverted_index_compaction() {
                 }
 
                 std::vector<snii::writer::SniiStreamedIndexSession*> destination_sessions(
-                        dest_segment_num, nullptr);
+                        snii_destination_rows.size(), nullptr);
                 if (merge_status.ok()) {
                     DORIS_CHECK(snii_merge_memory_reporter != nullptr);
-                    for (size_t destination_ordinal = 0; destination_ordinal < dest_segment_num;
+                    for (size_t destination_ordinal = 0;
+                         destination_ordinal < snii_destination_rows.size();
                          ++destination_ordinal) {
                         DBUG_EXECUTE_IF("Compaction::before_add_snii_destination_session",
                                         DBUG_RUN_CALLBACK(destination_ordinal, &merge_status));
@@ -1371,11 +1476,14 @@ Status Compaction::do_inverted_index_compaction() {
                             break;
                         }
                         auto* destination_writer =
-                                inverted_index_file_writers
-                                        .at(dest_segment_ids[destination_ordinal])
-                                        .get();
+                                _pending_index_groups != nullptr
+                                        ? _pending_index_groups->writer(
+                                                  cast_set<int32_t>(destination_ordinal))
+                                        : inverted_index_file_writers
+                                                  .at(dest_segment_ids[destination_ordinal])
+                                                  .get();
                         merge_status = destination_writer->add_snii_index_streamed(
-                                index_meta, dest_segment_num_rows[destination_ordinal],
+                                index_meta, snii_destination_rows[destination_ordinal],
                                 merge_plan->take_destination_null_docids(destination_ordinal),
                                 merge_plan->destination_writes_norms(),
                                 merge_plan->destination_index_config(), snii_merge_memory_reporter,
@@ -1410,6 +1518,9 @@ Status Compaction::do_inverted_index_compaction() {
                         error_handler(index_meta->index_id(), column_uniq_id);
                     }
                     return merge_status;
+                }
+                if (_pending_index_groups != nullptr) {
+                    _pending_index_groups->mark_written(index_meta->index_id());
                 }
                 continue;
             }
@@ -1623,13 +1734,6 @@ static bool check_rowset_has_inverted_index(const RowsetSharedPtr& src_rs, int32
 void Compaction::construct_index_compaction_columns(RowsetWriterContext& ctx) {
     if (_cur_tablet_schema->get_inverted_index_storage_format() ==
         InvertedIndexStorageFormatPB::SNII) {
-        // SNII index compaction merges per-segment index files; a segment group index input has
-        // none, so its output indexes are rebuilt from the data by the segment writer instead.
-        if (std::any_of(_input_rowsets.begin(), _input_rowsets.end(), [](const auto& rowset) {
-                return rowset->rowset_meta()->has_inverted_index_groups();
-            })) {
-            return;
-        }
         std::map<std::string, std::unique_ptr<IndexFileReader>> source_file_readers;
         for (const auto& destination_index : _cur_tablet_schema->inverted_indexes()) {
             const auto& col_unique_ids = destination_index->col_unique_ids();
@@ -1645,10 +1749,16 @@ void Compaction::construct_index_compaction_columns(RowsetWriterContext& ctx) {
                 continue;
             }
 
+            // A grouped input rowset contributes one source per group file (index_source_units).
             bool eligible = true;
             size_t source_segment_count = 0;
             for (const auto& rowset : _input_rowsets) {
-                source_segment_count += rowset->num_segments();
+                auto units = index_source_units(rowset.get());
+                if (!units.has_value()) {
+                    eligible = false;
+                    break;
+                }
+                source_segment_count += units->size();
             }
             if (source_segment_count == 0 ||
                 source_segment_count > kSniiCompactionReadAheadBudgetBytes /
@@ -1691,20 +1801,18 @@ void Compaction::construct_index_compaction_columns(RowsetWriterContext& ctx) {
                     break;
                 }
 
-                for (auto segment : rowset->segments()) {
-                    auto segment_path = segment.path();
-                    if (!segment_path.has_value()) {
-                        eligible = false;
-                        break;
-                    }
-                    const std::string index_file_path_prefix =
-                            std::string {InvertedIndexDescriptor::get_index_file_path_prefix(
-                                    segment_path.value())};
+                auto units = index_source_units(rowset.get());
+                if (!units.has_value()) {
+                    eligible = false;
+                    break;
+                }
+                for (const IndexSourceUnit& unit : *units) {
+                    const std::string& index_file_path_prefix = unit.index_path_prefix;
                     auto source_file_reader_it = source_file_readers.find(index_file_path_prefix);
                     if (source_file_reader_it == source_file_readers.end()) {
                         auto source_file_reader = std::make_unique<IndexFileReader>(
                                 fs, index_file_path_prefix, InvertedIndexStorageFormatPB::SNII,
-                                segment.inverted_index_file_info(), _tablet->tablet_id());
+                                unit.file_info, _tablet->tablet_id());
                         const Status init_status =
                                 source_file_reader->init(config::inverted_index_read_buffer_size);
                         if (!init_status.ok()) {

@@ -458,7 +458,7 @@ Status TextIndexReader::_execute(const IndexQueryContextPtr& context,
 //   - candidate_rows are not pushed down (see below);
 //   - BM25 scores are collected into a private similarity and handed back for this segment's
 //     rows only, shifted by -offset;
-//   - the count-only fast path is off, its document frequency is the group's, not the segment's;
+//   - a count-only single term is answered from its documents in the slice (see below);
 //   - the result is sliced to [offset, offset + rows) and shifted back.
 // A non-scoring group result is shared by every segment and scanner of the query through
 // QueryGroupResults, computed once even when they ask concurrently.
@@ -469,6 +469,45 @@ Status TextIndexReader::_execute_in_group(const IndexQueryContextPtr& context,
                                           std::shared_ptr<roaring::Roaring>& bit_map,
                                           InvertedIndexQueryCacheHandle* null_bitmap_cache_handle) {
     const IndexGroupSlice& slice = *_group_slice;
+    // A count-only scan of one exact term is answered per segment from the term's documents in
+    // this segment's slice (_term_document_frequency), which costs the posting's window directory
+    // plus at most two boundary windows instead of a group-wide decode. It goes around the query
+    // cache, whose entries for this file are group-space bitmaps.
+    if (context->count_on_index_fastpath && !is_gram_query(request.query_type)) {
+        SCOPED_RAW_TIMER(&context->stats->inverted_index_query_timer);
+        Admission admission;
+        RETURN_IF_ERROR(_admit(context, column_name, request, &admission));
+        const bool keyword = type() == InvertedIndexReaderType::STRING_TYPE;
+        if (keyword) {
+            RETURN_IF_ERROR(check_keyword_request(request, _index_meta.properties()));
+        }
+        std::unique_ptr<OpenedIndex> index;
+        RETURN_IF_ERROR(_open_index(context, &index));
+        if (admission.check_open != nullptr) {
+            RETURN_IF_ERROR(admission.check_open(*index));
+        }
+        logical::Node lowered;
+        const logical::Node* leaf = request.leaf;
+        if (leaf == nullptr) {
+            RETURN_IF_ERROR(_lower(context, request, keyword, &lowered));
+            leaf = &lowered;
+        }
+        if (const std::string* term = single_exact_term(*leaf); term != nullptr) {
+            bool handled = false;
+            std::shared_ptr<roaring::Roaring> count_bitmap;
+            RETURN_IF_ERROR(
+                    _count_from_df(context, column_name, *index, *term, &handled, &count_bitmap));
+            if (handled) {
+                bit_map = std::move(count_bitmap);
+                context->count_on_index_fastpath_hit = true;
+                if (null_bitmap_cache_handle != nullptr) {
+                    RETURN_IF_ERROR(
+                            _read_null_bitmap(context, null_bitmap_cache_handle, index.get()));
+                }
+                return Status::OK();
+            }
+        }
+    }
     const bool scoring =
             context->collection_similarity != nullptr &&
             IndexReaderHelper::is_need_similarity_score(request.query_type, &_index_meta);

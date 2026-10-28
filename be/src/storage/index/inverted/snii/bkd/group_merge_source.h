@@ -63,13 +63,15 @@ private:
     // Positions `cursor` on its next point, loading the next leaf when the current one is used up.
     Status advance(Cursor* cursor);
     void build_record(Cursor* cursor) const;
-    // Index of the cursor holding the smallest record, or -1 when all are exhausted.
-    int smallest() const;
+    // Record order between two sources' current points (memcmp of [value][doc_id]).
+    bool greater(int a, int b) const;
 
     const uint32_t _bytes_per_dim;
     const size_t _record_size;
     std::vector<Cursor> _cursors;
     bool _started = false;
+    // Min-heap of the non-exhausted sources by their current record.
+    std::vector<int> _heap;
     std::vector<uint8_t> _block;
 };
 

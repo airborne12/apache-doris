@@ -20,6 +20,7 @@
 #include <cstdint>
 
 #include "storage/index/inverted/snii/format/dict_entry.h"
+#include "storage/index/inverted/snii/query/internal/docid_posting_reader.h"
 #include "storage/index/inverted/snii/query/internal/query_test_counters.h"
 
 namespace doris::snii::query {
@@ -39,6 +40,25 @@ Status count_only_term_df(const LogicalIndexReader& idx, std::string_view term, 
     *count = found ? entry.df : 0;
     SNII_QUERY_COUNT(count_fastpath_hits);
     return Status::OK();
+}
+
+Status count_only_term_df_in_range(const LogicalIndexReader& idx, std::string_view term,
+                                   uint32_t lo, uint64_t hi, uint64_t* count) {
+    if (count == nullptr) {
+        return Status::Error<ErrorCode::INVALID_ARGUMENT, false>(
+                "count_only_term_df_in_range: null out");
+    }
+    bool found = false;
+    DictEntry entry;
+    uint64_t frq_base = 0;
+    uint64_t prx_base = 0;
+    RETURN_IF_ERROR(idx.lookup(term, &found, &entry, &frq_base, &prx_base));
+    if (!found) {
+        *count = 0;
+        return Status::OK();
+    }
+    SNII_QUERY_COUNT(count_fastpath_hits);
+    return internal::count_docid_posting_in_range(idx, entry, frq_base, prx_base, lo, hi, count);
 }
 
 } // namespace doris::snii::query

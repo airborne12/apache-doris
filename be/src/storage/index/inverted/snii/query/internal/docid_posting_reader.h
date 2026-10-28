@@ -43,6 +43,15 @@ Status read_docid_posting(const reader::LogicalIndexReader& idx, const format::D
 Status read_docid_posting(const reader::LogicalIndexReader& idx, const format::DictEntry& entry,
                           uint64_t frq_base, uint64_t prx_base, index_query::DocIdSink* sink);
 
+// Number of documents of the posting with lo <= docid < hi. A windowed posting adds the
+// doc_count of every window inside the range from its directory and decodes only the (at most
+// two) windows straddling a bound; inline and flat postings are decoded whole.
+// Example: windows [0,99] (60 docs), [100,199] (70), [200,299] (50), range [150, 250) -> decode the
+// second and third windows only.
+Status count_docid_posting_in_range(const reader::LogicalIndexReader& idx,
+                                    const format::DictEntry& entry, uint64_t frq_base,
+                                    uint64_t prx_base, uint32_t lo, uint64_t hi, uint64_t* count);
+
 // Reads postings in one I/O round and emits them into a deduplicating sink.
 // Dense windows use ranges; other postings share one document buffer.
 Status emit_docid_postings_streamed(const reader::LogicalIndexReader& idx,

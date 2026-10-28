@@ -76,38 +76,37 @@ Status GroupBkdMergeSource::advance(Cursor* cursor) {
     return Status::OK();
 }
 
-int GroupBkdMergeSource::smallest() const {
-    int best = -1;
-    for (int i = 0; i < static_cast<int>(_cursors.size()); ++i) {
-        if (_cursors[i].exhausted) {
-            continue;
-        }
-        if (best < 0 || std::memcmp(_cursors[i].record.data(), _cursors[best].record.data(),
-                                    _record_size) < 0) {
-            best = i;
-        }
-    }
-    return best;
+bool GroupBkdMergeSource::greater(int a, int b) const {
+    return std::memcmp(_cursors[a].record.data(), _cursors[b].record.data(), _record_size) > 0;
 }
 
 Status GroupBkdMergeSource::next_block(uint32_t max_points, Slice* records) {
+    const auto cmp = [this](int a, int b) { return greater(a, b); };
     if (!_started) {
         _started = true;
-        for (auto& cursor : _cursors) {
-            RETURN_IF_ERROR(advance(&cursor));
+        for (int i = 0; i < static_cast<int>(_cursors.size()); ++i) {
+            RETURN_IF_ERROR(advance(&_cursors[i]));
+            if (!_cursors[i].exhausted) {
+                _heap.push_back(i);
+            }
         }
+        std::make_heap(_heap.begin(), _heap.end(), cmp);
     }
     _block.clear();
-    // A linear scan over the sources per point: a group holds tens of segments, where a scan
-    // over K contiguous records beats a heap; the leaf decode dominates either way.
-    while (_block.size() < static_cast<size_t>(max_points) * _record_size) {
-        const int best = smallest();
-        if (best < 0) {
-            break;
-        }
-        Cursor& cursor = _cursors[best];
+    // A min-heap of the sources by current record: log K comparisons per point. Segment values
+    // interleave (a column's values are spread over every segment), so the smallest source
+    // changes almost every point and a linear scan would pay K comparisons each time; with 33
+    // segments and 146M points that scan dominated the merge.
+    while (!_heap.empty() && _block.size() < static_cast<size_t>(max_points) * _record_size) {
+        std::pop_heap(_heap.begin(), _heap.end(), cmp);
+        Cursor& cursor = _cursors[_heap.back()];
         _block.insert(_block.end(), cursor.record.begin(), cursor.record.end());
         RETURN_IF_ERROR(advance(&cursor));
+        if (cursor.exhausted) {
+            _heap.pop_back();
+        } else {
+            std::push_heap(_heap.begin(), _heap.end(), cmp);
+        }
     }
     *records = Slice(_block);
     return Status::OK();

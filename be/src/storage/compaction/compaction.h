@@ -53,6 +53,7 @@ class RowsetWriter;
 struct RowsetWriterContext;
 class StorageEngine;
 class CloudStorageEngine;
+class PendingIndexGroups;
 
 static constexpr int COMPACTION_DELETE_BITMAP_LOCK_ID = -1;
 static constexpr int64_t INVALID_COMPACTION_INITIATOR_ID = -100;
@@ -216,6 +217,8 @@ protected:
 
     int64_t _newest_write_timestamp {-1};
     std::unique_ptr<RowIdConversion> _rowid_conversion = nullptr;
+    // Segment group index files opened for this compaction's output (see PendingIndexGroups).
+    std::unique_ptr<PendingIndexGroups> _pending_index_groups;
     TabletSchemaSPtr _cur_tablet_schema;
     // The variant path layout of _cur_tablet_schema; empty unless it is an extended schema.
     VariantCompactionPathsSPtr _cur_variant_compaction_paths;

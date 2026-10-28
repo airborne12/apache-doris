@@ -37,6 +37,7 @@
 #include "storage/index/inverted/snii/compaction/rowid_conversion.h"
 #include "storage/index/inverted/snii/compaction/snii_index_compaction.h"
 #include "storage/index/inverted/snii/encoding/byte_sink.h"
+#include "storage/index/inverted/snii/query/count_query.h"
 #include "storage/index/inverted/snii/reader/logical_index_reader.h"
 #include "storage/index/inverted/snii/reader/snii_segment_reader.h"
 #include "storage/index/inverted/snii/snii_query_test_util.h"
@@ -170,6 +171,45 @@ TEST(SegmentGroupIndexTest, TextGroupMergeIsByteIdenticalToConcatenatedRebuild) 
                       make_term("gamma", {{.docid = 3, .positions = {0}}})}),
           &expected);
     EXPECT_EQ(merged.data(), expected.file.data());
+}
+
+// A segment's share of a group term df: the window directory answers whole windows, only the
+// boundary windows are decoded, and the result equals counting the decoded posting.
+TEST(SegmentGroupIndexTest, TermDfInRangeMatchesDecodedPosting) {
+    std::vector<PostingDoc> dense;
+    std::vector<PostingDoc> sparse;
+    for (uint32_t d = 0; d < 60000; ++d) {
+        if (d % 3 != 1) {
+            dense.push_back({.docid = d, .positions = {0}});
+        }
+        if (d % 997 == 0) {
+            sparse.push_back({.docid = d, .positions = {1}});
+        }
+    }
+    Opened index;
+    build(make_input(60000, {}, {make_term("dense", dense), make_term("sparse", sparse)}), &index);
+    const std::array<std::pair<uint32_t, uint64_t>, 6> ranges = {
+            std::pair<uint32_t, uint64_t> {0, 60000},
+            {0, 1},
+            {1234, 1235},
+            {5000, 37777},
+            {59999, 60000},
+            {30000, 30000}};
+    for (const char* term : {"dense", "sparse", "absent"}) {
+        std::vector<uint32_t> all;
+        if (std::string(term) == "dense") {
+            for (const auto& d : dense) all.push_back(d.docid);
+        } else if (std::string(term) == "sparse") {
+            for (const auto& d : sparse) all.push_back(d.docid);
+        }
+        for (const auto& [lo, hi] : ranges) {
+            uint64_t got = 0;
+            assert_ok(snii::query::count_only_term_df_in_range(index.index, term, lo, hi, &got));
+            const auto expected = static_cast<uint64_t>(std::count_if(
+                    all.begin(), all.end(), [&](uint32_t d) { return d >= lo && d < hi; }));
+            EXPECT_EQ(got, expected) << term << " [" << lo << ", " << hi << ")";
+        }
+    }
 }
 
 // ---------------------------------------------------------------- BKD group merge

@@ -17,9 +17,11 @@
 
 #include "storage/index/inverted/snii/query/internal/docid_posting_reader.h"
 
+#include <algorithm>
 #include <limits>
 #include <utility>
 
+#include "common/check.h"
 #include "storage/index/inverted/snii/common/slice.h"
 #include "storage/index/inverted/snii/format/dict_entry.h"
 #include "storage/index/inverted/snii/format/frq_pod.h"
@@ -222,6 +224,84 @@ Status read_docid_posting(const LogicalIndexReader& idx, const DictEntry& entry,
     std::vector<uint32_t> docs;
     RETURN_IF_ERROR(decode_flat_plan(docs_fetcher, plan, &docs));
     return sink->append_sorted(docs);
+}
+
+Status count_docid_posting_in_range(const LogicalIndexReader& idx, const DictEntry& entry,
+                                    uint64_t frq_base, uint64_t prx_base, uint32_t lo, uint64_t hi,
+                                    uint64_t* count) {
+    DORIS_CHECK(count != nullptr);
+    *count = 0;
+    const auto count_sorted = [&](const std::vector<uint32_t>& docs) {
+        const auto first = std::lower_bound(docs.begin(), docs.end(), lo);
+        const auto last = std::lower_bound(first, docs.end(), hi,
+                                           [](uint32_t d, uint64_t bound) { return d < bound; });
+        return static_cast<uint64_t>(last - first);
+    };
+    if (entry.enc != DictEntryEnc::kWindowed || entry.kind == DictEntryKind::kInline) {
+        std::vector<uint32_t> docs;
+        RETURN_IF_ERROR(read_docid_posting(idx, entry, frq_base, prx_base, &docs));
+        *count = count_sorted(docs);
+        return Status::OK();
+    }
+    // Only the window directory and the boundary windows' dd regions are read: for a dense term
+    // the full payload is megabytes per group, while one segment's slice needs two windows.
+    RETURN_IF_ERROR(validate_windowed_docs_prefix(entry));
+    uint64_t prelude_abs = 0;
+    RETURN_IF_ERROR(reader::prelude_abs_offset(idx, entry, frq_base, &prelude_abs));
+    const size_t prelude_len = static_cast<size_t>(entry.prelude_len);
+    io::BatchRangeFetcher prelude_fetcher(idx.reader());
+    const size_t prelude_handle = prelude_fetcher.add(prelude_abs, prelude_len);
+    RETURN_IF_ERROR(prelude_fetcher.fetch());
+    FrqPreludeReader prelude;
+    RETURN_IF_ERROR(FrqPreludeReader::open(prelude_fetcher.get(prelude_handle), &prelude));
+    if (prelude_len + prelude.dd_block_len() != entry.frq_len) {
+        return Status::Error<ErrorCode::INVERTED_INDEX_FILE_CORRUPTED, false>(
+                "docid_posting_reader: docs prefix length mismatch");
+    }
+    std::vector<WindowMeta> boundary;
+    for (uint32_t w = 0; w < prelude.n_windows(); ++w) {
+        WindowMeta meta;
+        RETURN_IF_ERROR(prelude.window(w, &meta));
+        uint32_t first = 0;
+        RETURN_IF_ERROR(reader::first_docid_in_window(meta, w, &first));
+        if (static_cast<uint64_t>(first) >= hi) {
+            break;
+        }
+        if (meta.last_docid < lo) {
+            continue;
+        }
+        if (first >= lo && static_cast<uint64_t>(meta.last_docid) < hi) {
+            *count += meta.doc_count;
+            continue;
+        }
+        if (meta.dd_off > prelude.dd_block_len() ||
+            meta.dd_disk_len > prelude.dd_block_len() - meta.dd_off) {
+            return Status::Error<ErrorCode::INVERTED_INDEX_FILE_CORRUPTED, false>(
+                    "docid_posting_reader: window dd range out of prefix");
+        }
+        boundary.push_back(meta);
+    }
+    if (boundary.empty()) {
+        return Status::OK();
+    }
+    io::BatchRangeFetcher dd_fetcher(idx.reader());
+    std::vector<size_t> handles;
+    for (const WindowMeta& meta : boundary) {
+        handles.push_back(
+                dd_fetcher.add(prelude_abs + prelude_len + meta.dd_off, meta.dd_disk_len));
+    }
+    RETURN_IF_ERROR(dd_fetcher.fetch());
+    std::vector<uint32_t> docs;
+    std::vector<std::vector<uint32_t>> positions;
+    for (size_t i = 0; i < boundary.size(); ++i) {
+        docs.clear();
+        positions.clear();
+        RETURN_IF_ERROR(reader::decode_window_slices(boundary[i], dd_fetcher.get(handles[i]),
+                                                     Slice(), /*want_positions=*/false, &docs,
+                                                     &positions));
+        *count += count_sorted(docs);
+    }
+    return Status::OK();
 }
 
 Status emit_docid_postings_streamed(const LogicalIndexReader& idx,

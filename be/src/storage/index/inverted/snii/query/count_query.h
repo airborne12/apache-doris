@@ -33,4 +33,9 @@ namespace doris::snii::query {
 Status count_only_term_df(const reader::LogicalIndexReader& idx, std::string_view term,
                           uint64_t* count);
 
+// The same df restricted to documents lo <= docid < hi, e.g. one segment's slice of a segment
+// group index. Reads the posting's window directory and decodes only the boundary windows.
+Status count_only_term_df_in_range(const reader::LogicalIndexReader& idx, std::string_view term,
+                                   uint32_t lo, uint64_t hi, uint64_t* count);
+
 } // namespace doris::snii::query

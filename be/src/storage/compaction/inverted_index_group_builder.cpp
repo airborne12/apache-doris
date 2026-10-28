@@ -142,51 +142,75 @@ Status merge_bkd_index(const std::vector<std::unique_ptr<segment_v2::IndexFileRe
                                                        index_meta, writer);
 }
 
-// Writes group `group_id` (positions [first_pos, first_pos + count)) into `path`.
-Status write_group(const io::FileSystemSPtr& fs, const std::string& rowset_id,
-                   const std::string& prefix, int32_t group_id, int64_t tablet_id,
-                   const std::vector<std::unique_ptr<segment_v2::IndexFileReader>>& readers,
+// Opens the compound file of one group. seg_id only names files in
+// IndexFileWriter::get_index_file_names(), which groups never use.
+Status open_group_writer(const io::FileSystemSPtr& fs, const std::string& prefix,
+                         const std::string& rowset_id, int32_t group_id, int64_t tablet_id,
+                         std::unique_ptr<segment_v2::IndexFileWriter>* out) {
+    io::FileWriterPtr file_writer;
+    RETURN_IF_ERROR(fs->create_file(
+            segment_v2::InvertedIndexDescriptor::get_index_file_path_v2(prefix), &file_writer));
+    *out = std::make_unique<segment_v2::IndexFileWriter>(
+            fs, prefix, rowset_id, group_id, InvertedIndexStorageFormatPB::SNII,
+            std::move(file_writer), true /* can_use_ram_dir */, tablet_id);
+    return Status::OK();
+}
+
+// Merges the per-segment indexes of one group that `writer` does not hold yet (`written`) and
+// seals the group file. `readers` are the group's segments in position order.
+Status write_group(const std::vector<std::unique_ptr<segment_v2::IndexFileReader>>& readers,
                    const std::vector<uint32_t>& rows, const GroupedIndexes& indexes,
+                   const std::set<int64_t>& written,
                    const std::shared_ptr<snii::writer::MemoryReporter>& reporter,
-                   InvertedIndexFileInfo* file_info) {
+                   segment_v2::IndexFileWriter* writer, InvertedIndexFileInfo* file_info) {
     std::vector<uint32_t> offsets;
     uint32_t group_rows = 0;
     for (const uint32_t r : rows) {
         offsets.push_back(group_rows);
         group_rows += r;
     }
-    // Identity-plus-offset conversion: no row moves inside a group, so source i's rowid r is
-    // group docid offsets[i] + r. One destination (the group).
-    snii::compaction::RowIdConversionMap map(rows.size());
-    for (size_t i = 0; i < rows.size(); ++i) {
-        map[i].resize(rows[i]);
-        for (uint32_t r = 0; r < rows[i]; ++r) {
-            map[i][r] = {0, offsets[i] + r};
+    std::vector<const TabletIndex*> text;
+    for (const TabletIndex* index : indexes.text) {
+        if (!written.contains(index->index_id())) {
+            text.push_back(index);
         }
     }
-    std::unique_ptr<snii::compaction::ValidatedRowIdConversion> conversion;
-    const std::vector<uint32_t> destination_rows {group_rows};
-    RETURN_IF_ERROR(snii::compaction::ValidatedRowIdConversion::create(&map, rows, destination_rows,
-                                                                       &conversion));
-
-    io::FileWriterPtr file_writer;
-    RETURN_IF_ERROR(fs->create_file(
-            segment_v2::InvertedIndexDescriptor::get_index_file_path_v2(prefix), &file_writer));
-    // seg_id only names files in segment_v2::IndexFileWriter::get_index_file_names(), which groups never use.
-    segment_v2::IndexFileWriter writer(fs, prefix, rowset_id, group_id,
-                                       InvertedIndexStorageFormatPB::SNII, std::move(file_writer),
-                                       true /* can_use_ram_dir */, tablet_id);
-    for (const TabletIndex* index : indexes.text) {
-        RETURN_IF_ERROR(
-                merge_text_index(readers, index, *conversion, group_rows, reporter, &writer));
+    if (!text.empty()) {
+        // Identity-plus-offset conversion: no row moves inside a group, so source i's rowid r is
+        // group docid offsets[i] + r. One destination (the group).
+        snii::compaction::RowIdConversionMap map(rows.size());
+        for (size_t i = 0; i < rows.size(); ++i) {
+            map[i].resize(rows[i]);
+            for (uint32_t r = 0; r < rows[i]; ++r) {
+                map[i][r] = {0, offsets[i] + r};
+            }
+        }
+        std::unique_ptr<snii::compaction::ValidatedRowIdConversion> conversion;
+        const std::vector<uint32_t> destination_rows {group_rows};
+        RETURN_IF_ERROR(snii::compaction::ValidatedRowIdConversion::create(
+                &map, rows, destination_rows, &conversion));
+        for (const TabletIndex* index : text) {
+            RETURN_IF_ERROR(
+                    merge_text_index(readers, index, *conversion, group_rows, reporter, writer));
+        }
     }
     for (const auto& [index, type] : indexes.bkd) {
-        RETURN_IF_ERROR(merge_bkd_index(readers, index, type, offsets, group_rows, &writer));
+        DORIS_CHECK(!written.contains(index->index_id()));
+        RETURN_IF_ERROR(merge_bkd_index(readers, index, type, offsets, group_rows, writer));
     }
-    RETURN_IF_ERROR(writer.begin_close());
-    RETURN_IF_ERROR(writer.finish_close());
-    *file_info = *writer.get_index_file_info();
+    RETURN_IF_ERROR(writer->begin_close());
+    RETURN_IF_ERROR(writer->finish_close());
+    *file_info = *writer->get_index_file_info();
     return Status::OK();
+}
+
+bool should_group(const TabletSchema& schema, int64_t num_segments, GroupedIndexes* indexes) {
+    // Cloud mode is left out until the recycler and file cache warm-up know the group files:
+    // until then a recycled rowset would leave its group files behind in the object store.
+    return config::enable_inverted_index_segment_group && !config::is_cloud_mode() &&
+           num_segments >= 2 &&
+           schema.get_inverted_index_storage_format() == InvertedIndexStorageFormatPB::SNII &&
+           collect_grouped_indexes(schema, indexes);
 }
 
 } // namespace
@@ -218,19 +242,112 @@ std::vector<int32_t> InvertedIndexGroupBuilder::plan_groups(
     return counts;
 }
 
-Status InvertedIndexGroupBuilder::build(const RowsetSharedPtr& rowset, int64_t tablet_id) {
-    // Cloud mode is left out until the recycler and file cache warm-up know the group files:
-    // until then a recycled rowset would leave its group files behind in the object store.
-    if (!config::enable_inverted_index_segment_group || config::is_cloud_mode() ||
-        rowset->num_segments() < 2) {
-        return Status::OK();
+Result<std::vector<IndexSourceUnit>> index_source_units(Rowset* rowset) {
+    std::vector<IndexSourceUnit> units;
+    const RowsetMetaSharedPtr meta = rowset->rowset_meta();
+    if (!meta->has_inverted_index_groups()) {
+        for (auto segment : rowset->segments()) {
+            auto path = segment.path();
+            if (!path.has_value()) {
+                return ResultError(path.error());
+            }
+            units.push_back(
+                    {.index_path_prefix = std::string {segment_v2::InvertedIndexDescriptor::
+                                                               get_index_file_path_prefix(*path)},
+                     .file_info = segment.inverted_index_file_info(),
+                     .first_pos = cast_set<int64_t>(segment.pos()),
+                     .segment_count = 1});
+        }
+        return units;
     }
-    const TabletSchemaSPtr schema = rowset->tablet_schema();
-    if (schema->get_inverted_index_storage_format() != InvertedIndexStorageFormatPB::SNII) {
-        return Status::OK();
+    std::vector<uint32_t> segment_rows;
+    meta->get_num_segment_rows(&segment_rows);
+    const RowsetIndexGroups groups({meta->inverted_index_group_segment_counts().begin(),
+                                    meta->inverted_index_group_segment_counts().end()},
+                                   segment_rows);
+    auto first_path = rowset->segment(0).path();
+    if (!first_path.has_value()) {
+        return ResultError(first_path.error());
     }
+    for (int32_t group_id = 0; group_id < groups.group_count(); ++group_id) {
+        units.push_back({.index_path_prefix =
+                                 segment_v2::InvertedIndexDescriptor::get_index_group_path_prefix(
+                                         *first_path, rowset->rowset_id().to_string(), group_id),
+                         .file_info = meta->inverted_index_group_file_info(group_id),
+                         .first_pos = groups.first_pos(group_id),
+                         .segment_count = groups.segment_count(group_id)});
+    }
+    return units;
+}
+
+PendingIndexGroups::PendingIndexGroups(std::vector<int32_t> counts,
+                                       const std::vector<uint32_t>& segment_rows)
+        : _counts(std::move(counts)), _groups(_counts, segment_rows) {}
+
+// A compaction that failed after prepare() never reaches build(): its group files are removed
+// here, the per-segment files go with the abandoned output rowset.
+PendingIndexGroups::~PendingIndexGroups() {
+    if (!_sealed) {
+        _writers.clear();
+        for (const auto& path : _paths) {
+            static_cast<void>(_fs->delete_file(path));
+        }
+    }
+}
+
+Result<std::unique_ptr<PendingIndexGroups>> InvertedIndexGroupBuilder::prepare(
+        const TabletSchema& schema, const io::FileSystemSPtr& fs,
+        const std::string& any_segment_path, const std::string& rowset_id,
+        const std::vector<uint32_t>& segment_rows, int64_t estimated_index_bytes,
+        int64_t tablet_id) {
     GroupedIndexes indexes;
-    if (!collect_grouped_indexes(*schema, &indexes)) {
+    if (!should_group(schema, static_cast<int64_t>(segment_rows.size()), &indexes)) {
+        return std::unique_ptr<PendingIndexGroups>();
+    }
+    uint64_t total_rows = 0;
+    for (const uint32_t r : segment_rows) {
+        total_rows += r;
+    }
+    std::vector<int64_t> estimated_bytes;
+    for (const uint32_t r : segment_rows) {
+        estimated_bytes.push_back(
+                total_rows == 0 ? 0
+                                : static_cast<int64_t>(static_cast<double>(estimated_index_bytes) *
+                                                       r / static_cast<double>(total_rows)));
+    }
+    std::unique_ptr<PendingIndexGroups> pending(new PendingIndexGroups(
+            plan_groups(segment_rows, estimated_bytes, config::inverted_index_group_max_bytes),
+            segment_rows));
+    pending->_fs = fs;
+    for (int32_t group_id = 0; group_id < pending->_groups.group_count(); ++group_id) {
+        const std::string prefix = segment_v2::InvertedIndexDescriptor::get_index_group_path_prefix(
+                any_segment_path, rowset_id, group_id);
+        std::unique_ptr<segment_v2::IndexFileWriter> writer;
+        Status st = open_group_writer(fs, prefix, rowset_id, group_id, tablet_id, &writer);
+        if (!st.ok()) {
+            for (const auto& path : pending->_paths) {
+                static_cast<void>(fs->delete_file(path));
+            }
+            return ResultError(std::move(st));
+        }
+        pending->_paths.push_back(
+                segment_v2::InvertedIndexDescriptor::get_index_file_path_v2(prefix));
+        pending->_writers.push_back(std::move(writer));
+    }
+    return pending;
+}
+
+Status InvertedIndexGroupBuilder::build(const RowsetSharedPtr& rowset, int64_t tablet_id,
+                                        std::unique_ptr<PendingIndexGroups> pending) {
+    const TabletSchemaSPtr schema = rowset->tablet_schema();
+    GroupedIndexes indexes;
+    if (!should_group(*schema, rowset->num_segments(), &indexes)) {
+        // prepare() said yes for the same schema and segments; only a config flipped in between
+        // can say no here, and the indexes it wrote exist nowhere else.
+        if (pending != nullptr) {
+            return Status::Error<ErrorCode::INVERTED_INDEX_COMPACTION_ERROR>(
+                    "segment group index disabled while compaction was writing it");
+        }
         return Status::OK();
     }
     RowsetMetaSharedPtr meta = rowset->rowset_meta();
@@ -258,10 +375,44 @@ Status InvertedIndexGroupBuilder::build(const RowsetSharedPtr& rowset, int64_t t
         readers.push_back(std::move(reader));
     }
 
-    const std::vector<int32_t> counts =
-            plan_groups(segment_rows, segment_index_bytes, config::inverted_index_group_max_bytes);
-    const RowsetIndexGroups groups(counts, segment_rows);
     const std::string rowset_id = rowset->rowset_id().to_string();
+    if (pending == nullptr) {
+        std::unique_ptr<PendingIndexGroups> fresh(
+                new PendingIndexGroups(plan_groups(segment_rows, segment_index_bytes,
+                                                   config::inverted_index_group_max_bytes),
+                                       segment_rows));
+        fresh->_fs = fs;
+        for (int32_t group_id = 0; group_id < fresh->_groups.group_count(); ++group_id) {
+            const std::string prefix =
+                    segment_v2::InvertedIndexDescriptor::get_index_group_path_prefix(
+                            segment_prefixes.front() +
+                                    std::string(
+                                            segment_v2::InvertedIndexDescriptor::segment_suffix),
+                            rowset_id, group_id);
+            std::unique_ptr<segment_v2::IndexFileWriter> writer;
+            Status st = open_group_writer(fs, prefix, rowset_id, group_id, tablet_id, &writer);
+            if (!st.ok()) {
+                for (const auto& path : fresh->_paths) {
+                    static_cast<void>(fs->delete_file(path));
+                }
+                LOG(WARNING) << "keep segment index layout, cannot create group file. tablet="
+                             << tablet_id << ", rowset=" << rowset_id << ", status=" << st;
+                return Status::OK();
+            }
+            fresh->_paths.push_back(
+                    segment_v2::InvertedIndexDescriptor::get_index_file_path_v2(prefix));
+            fresh->_writers.push_back(std::move(writer));
+        }
+        pending = std::move(fresh);
+    } else {
+        // The plan was cut from the same segment row counts before the rowset was built.
+        const RowsetIndexGroups built(pending->_counts, segment_rows);
+        for (int32_t group_id = 0; group_id < built.group_count(); ++group_id) {
+            DORIS_CHECK_EQ(pending->_groups.group_rows(group_id), built.group_rows(group_id));
+        }
+    }
+    const bool fallback_allowed = pending->_written.empty();
+    const RowsetIndexGroups& groups = pending->_groups;
     auto reporter = std::make_shared<snii::writer::MemoryReporter>(
             snii::writer::snii_build_consume_release(
                     snii::writer::BuildMemoryPopulation::kUnregistered),
@@ -269,8 +420,7 @@ Status InvertedIndexGroupBuilder::build(const RowsetSharedPtr& rowset, int64_t t
             snii::writer::MemoryReporter::CapPolicy::kHardLimit,
             static_cast<uint64_t>(config::snii_postings_workspace_bytes));
 
-    std::vector<std::string> group_paths;
-    std::vector<InvertedIndexFileInfo> group_infos(counts.size());
+    std::vector<InvertedIndexFileInfo> group_infos(groups.group_count());
     Status status;
     for (int32_t group_id = 0; group_id < groups.group_count() && status.ok(); ++group_id) {
         const auto first = groups.first_pos(group_id);
@@ -281,20 +431,15 @@ Status InvertedIndexGroupBuilder::build(const RowsetSharedPtr& rowset, int64_t t
         }
         const std::vector<uint32_t> rows(segment_rows.begin() + first,
                                          segment_rows.begin() + first + count);
-        const std::string prefix = segment_v2::InvertedIndexDescriptor::get_index_group_path_prefix(
-                segment_prefixes[first] +
-                        std::string(segment_v2::InvertedIndexDescriptor::segment_suffix),
-                rowset_id, group_id);
-        group_paths.push_back(segment_v2::InvertedIndexDescriptor::get_index_file_path_v2(prefix));
-        status = write_group(fs, rowset_id, prefix, group_id, tablet_id, group_readers, rows,
-                             indexes, reporter, &group_infos[group_id]);
+        status = write_group(group_readers, rows, indexes, pending->_written, reporter,
+                             pending->_writers[group_id].get(), &group_infos[group_id]);
     }
     if (!status.ok()) {
+        if (!fallback_allowed) {
+            return status;
+        }
         LOG(WARNING) << "keep segment index layout, segment group merge failed. tablet="
                      << tablet_id << ", rowset=" << rowset_id << ", status=" << status;
-        for (const auto& path : group_paths) {
-            static_cast<void>(fs->delete_file(path));
-        }
         return Status::OK();
     }
 
@@ -302,7 +447,8 @@ Status InvertedIndexGroupBuilder::build(const RowsetSharedPtr& rowset, int64_t t
     for (const auto& info : group_infos) {
         group_bytes += info.index_size();
     }
-    meta->set_inverted_index_groups(counts, group_infos);
+    pending->_sealed = true;
+    meta->set_inverted_index_groups(pending->_counts, group_infos);
     meta->set_index_disk_size(group_bytes);
     meta->set_total_disk_size(meta->data_disk_size() + group_bytes);
     // Any Segment object built from the old meta would look for the per-segment files deleted
@@ -313,7 +459,8 @@ Status InvertedIndexGroupBuilder::build(const RowsetSharedPtr& rowset, int64_t t
                 segment_v2::InvertedIndexDescriptor::get_index_file_path_v2(prefix)));
     }
     LOG(INFO) << "built segment group index. tablet=" << tablet_id << ", rowset=" << rowset_id
-              << ", segments=" << rowset->num_segments() << ", groups=" << counts.size()
+              << ", segments=" << rowset->num_segments() << ", groups=" << groups.group_count()
+              << ", written_by_index_compaction=" << pending->_written.size()
               << ", group_index_bytes=" << group_bytes;
     return Status::OK();
 }
