@@ -43,6 +43,7 @@ import org.apache.doris.datasource.InternalCatalog;
 import org.apache.doris.datasource.storage.StorageAdapter;
 import org.apache.doris.persist.EditLog;
 import org.apache.doris.system.SystemInfoService;
+import org.apache.doris.thrift.TInvertedIndexFileStorageFormat;
 import org.apache.doris.thrift.TStorageMedium;
 
 import com.google.common.collect.Lists;
@@ -273,6 +274,20 @@ public class RestoreJobTest {
         // 3. delete files
         in.close();
         Files.delete(path);
+    }
+
+    @Test
+    public void testBackedUpInvertedIndexFileStorageFormat() {
+        OlapTable remoteTbl = new OlapTable();
+        remoteTbl.setPartitionInfo(new PartitionInfo(PartitionType.RANGE));
+        remoteTbl.setInvertedIndexFileStorageFormat(TInvertedIndexFileStorageFormat.V3);
+        remoteTbl.getPartitionInfo().setInvertedIndexFileStorageFormat(100L, TInvertedIndexFileStorageFormat.SNII);
+
+        // A partition with an entry of its own keeps it; any other one was written in the table's format.
+        Assertions.assertEquals(TInvertedIndexFileStorageFormat.SNII,
+                RestoreJob.getBackedUpInvertedIndexFileStorageFormat(remoteTbl, 100L));
+        Assertions.assertEquals(TInvertedIndexFileStorageFormat.V3,
+                RestoreJob.getBackedUpInvertedIndexFileStorageFormat(remoteTbl, 101L));
     }
 
     @Test
