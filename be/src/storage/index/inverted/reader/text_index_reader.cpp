@@ -460,8 +460,8 @@ Status TextIndexReader::_execute(const IndexQueryContextPtr& context,
 //     rows only, shifted by -offset;
 //   - the count-only fast path is off, its document frequency is the group's, not the segment's;
 //   - the result is sliced to [offset, offset + rows) and shifted back.
-// A full (non-candidate, non-scoring) group result is shared by every segment and scanner of the
-// query through a query-scoped query cache entry, computed once even when they ask concurrently.
+// A non-scoring group result is shared by every segment and scanner of the query through
+// QueryGroupResults, computed once even when they ask concurrently.
 // Example: 31 segments of one group in 4 scanners run a regexp expansion once, not 31 times.
 Status TextIndexReader::_execute_in_group(const IndexQueryContextPtr& context,
                                           const std::string& column_name,
@@ -528,16 +528,13 @@ Status TextIndexReader::_execute_in_group(const IndexQueryContextPtr& context,
                                                                  .query_type = request.query_type,
                                                                  .max_expansions = max_expansions})
                                   .encode();
-        const InvertedIndexQueryCache::CacheKey group_key(
-                query_scoped_group_path(file_key, context->runtime_state->query_id()), column_name,
-                request.query_type, semantic);
-        auto* cache = InvertedIndexQueryCache::instance();
-        InvertedIndexQueryCacheHandle handle;
-        if (cache->lookup(group_key, &handle)) {
-            group_result = handle.get_bitmap();
-        } else {
+        auto* results = QueryGroupResults::instance();
+        const std::string group_key =
+                QueryGroupResults::make_key(context->runtime_state->query_id(), semantic);
+        group_result = results->lookup(group_key);
+        if (group_result == nullptr) {
             Status flight_status = run_query_single_flight(
-                    query_single_flight(), group_key.encode(), &group_result,
+                    query_single_flight(), group_key, &group_result,
 #ifdef BE_TEST
                     _single_flight_follower_joined_observer, _single_flight_follower_joined_opaque,
                     _single_flight_leader_before_compute_observer,
@@ -545,8 +542,8 @@ Status TextIndexReader::_execute_in_group(const IndexQueryContextPtr& context,
 #endif
                     [&](std::shared_ptr<roaring::Roaring>* shared) {
                         RETURN_IF_ERROR(run_group(shared));
-                        InvertedIndexQueryCacheHandle inserted;
-                        cache->insert(group_key, *shared, &inserted);
+                        results->insert(group_key, context->runtime_state->get_query_ctx(),
+                                        *shared);
                         return Status::OK();
                     });
             RETURN_IF_ERROR(flight_status);

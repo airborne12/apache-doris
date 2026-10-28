@@ -109,6 +109,7 @@ public:
 
     // Points this segment's index reads at its segment group index file. Called right after
     // open(), before any index is read.
+    bool has_index_group() const { return _index_group_slice.has_value(); }
     void set_index_group(std::string group_prefix, InvertedIndexFileInfo group_file_info,
                          const IndexGroupSlice& slice) {
         _index_group_prefix = std::move(group_prefix);

@@ -137,24 +137,20 @@ Status SniiBkdIndexReader::query(const IndexQueryContextPtr& context,
                                                  query_str};
     auto* cache = InvertedIndexQueryCache::instance();
     InvertedIndexQueryCacheHandle cache_handler;
-    // Over a segment group index the range runs once per group and query: its group-space
-    // bitmap is kept under a query-scoped key (see query_scoped_group_path) and every segment of
-    // the group takes its slice.
+    // Over a segment group index the range runs once per group and query (QueryGroupResults)
+    // and every segment of the group takes its slice.
     if (_group_slice.has_value()) {
-        const InvertedIndexQueryCache::CacheKey group_key(
-                query_scoped_group_path(index_file_key, context->runtime_state->query_id()),
-                column_name, query_type, query_str);
-        InvertedIndexQueryCacheHandle group_handle;
-        std::shared_ptr<roaring::Roaring> group_bitmap;
-        if (cache->lookup(group_key, &group_handle)) {
-            group_bitmap = group_handle.get_bitmap();
-        } else {
+        auto* results = QueryGroupResults::instance();
+        const std::string group_key =
+                QueryGroupResults::make_key(context->runtime_state->query_id(), cache_key.encode());
+        std::shared_ptr<roaring::Roaring> group_bitmap = results->lookup(group_key);
+        if (group_bitmap == nullptr) {
             group_bitmap = std::make_shared<roaring::Roaring>();
             RETURN_IF_ERROR(searcher->reader->range(bounds.lower, bounds.lower_inclusive,
                                                     bounds.upper, bounds.upper_inclusive,
                                                     group_bitmap.get()));
             group_bitmap->runOptimize();
-            cache->insert(group_key, group_bitmap, &group_handle);
+            results->insert(group_key, context->runtime_state->get_query_ctx(), group_bitmap);
         }
         bit_map = std::make_shared<roaring::Roaring>(_group_slice->to_segment(*group_bitmap));
         return Status::OK();

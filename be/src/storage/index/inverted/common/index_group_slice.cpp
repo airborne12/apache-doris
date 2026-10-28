@@ -19,31 +19,24 @@
 
 #include <fmt/format.h>
 
+#include <algorithm>
 #include <roaring/roaring.hh>
-#include <vector>
 
+#include "common/check.h"
+#include "runtime/query_context.h"
 #include "util/uid_util.h"
 
 namespace doris::segment_v2 {
 
+// Container-level, not per value: the intersection with the slice's range and the shift both work
+// on whole 2^16-value containers, so slicing a dense filter bitmap (status = 'error' over a whole
+// group) costs about its container count, not its cardinality, for every segment of the group.
 roaring::Roaring IndexGroupSlice::to_segment(const roaring::Roaring& group_bitmap) const {
-    roaring::Roaring out;
-    if (rows == 0) {
-        return out;
-    }
-    std::vector<uint32_t> buffer;
-    buffer.reserve(1024);
-    auto it = group_bitmap.begin();
-    it.equalorlarger(offset);
-    const uint64_t end = static_cast<uint64_t>(offset) + rows;
-    for (; it != group_bitmap.end() && *it < end; ++it) {
-        buffer.push_back(*it - offset);
-        if (buffer.size() == 1024) {
-            out.addMany(buffer.size(), buffer.data());
-            buffer.clear();
-        }
-    }
-    out.addMany(buffer.size(), buffer.data());
+    roaring::Roaring range;
+    range.addRange(offset, static_cast<uint64_t>(offset) + rows);
+    range &= group_bitmap;
+    roaring::Roaring out(
+            roaring::api::roaring_bitmap_add_offset(&range.roaring, -static_cast<int64_t>(offset)));
     out.runOptimize();
     return out;
 }
@@ -52,8 +45,35 @@ std::string IndexGroupSlice::cache_suffix() const {
     return fmt::format("@slice:{}:{}", offset, rows);
 }
 
-std::string query_scoped_group_path(std::string_view index_file_key, const TUniqueId& query_id) {
-    return fmt::format("{}@q:{}", index_file_key, print_id(query_id));
+QueryGroupResults* QueryGroupResults::instance() {
+    static QueryGroupResults results;
+    return &results;
+}
+
+std::string QueryGroupResults::make_key(const TUniqueId& query_id, std::string_view semantic_key) {
+    return fmt::format("{}|{}", print_id(query_id), semantic_key);
+}
+
+std::shared_ptr<roaring::Roaring> QueryGroupResults::lookup(const std::string& key) {
+    std::lock_guard<std::mutex> guard(_lock);
+    auto it = _entries.find(key);
+    if (it == _entries.end() || it->second.owner.expired()) {
+        return nullptr;
+    }
+    return it->second.bitmap;
+}
+
+void QueryGroupResults::insert(const std::string& key, const QueryContext* query,
+                               std::shared_ptr<roaring::Roaring> bitmap) {
+    DORIS_CHECK(query != nullptr);
+    std::lock_guard<std::mutex> guard(_lock);
+    // Amortized cleanup: entries of finished queries are dropped whenever the table has doubled
+    // since the last sweep, so its size stays proportional to the results of running queries.
+    if (_entries.size() >= _purge_at) {
+        std::erase_if(_entries, [](const auto& entry) { return entry.second.owner.expired(); });
+        _purge_at = std::max<size_t>(64, _entries.size() * 2);
+    }
+    _entries[key] = Entry {.owner = query->weak_from_this(), .bitmap = std::move(bitmap)};
 }
 
 } // namespace doris::segment_v2

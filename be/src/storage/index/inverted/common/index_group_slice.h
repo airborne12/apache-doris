@@ -18,14 +18,18 @@
 #pragma once
 
 #include <cstdint>
+#include <memory>
+#include <mutex>
 #include <string>
 #include <string_view>
+#include <unordered_map>
 
 namespace roaring {
 class Roaring;
 } // namespace roaring
 
 namespace doris {
+class QueryContext;
 class TUniqueId;
 } // namespace doris
 
@@ -48,11 +52,34 @@ struct IndexGroupSlice {
     std::string cache_suffix() const;
 };
 
-// Index path of the query cache entry holding a group-space result for ONE query: every segment
-// of the group, in every scanner of that query, slices the same evaluation instead of re-running
-// it over the whole group. The query id keeps later queries from ever hitting the entry, so it is
-// written whether or not the session enables the query cache; unused entries age out of the LRU.
-// Example: ".../{rowset}_g0_10002" + "@q:5f3a-..." for query 5f3a-...
-std::string query_scoped_group_path(std::string_view index_file_key, const TUniqueId& query_id);
+// Group-space index results of running queries: every segment of a group, in every scanner of
+// the query, slices the same evaluation instead of re-running it over the whole group. An entry
+// lives as long as its query (it holds a weak reference to the QueryContext); entries of finished
+// queries are dropped on later inserts.
+//
+// Deliberately not the InvertedIndexQueryCache: that LRU-K cache refuses the first insert of a key
+// once it is full, so the second segment of a group would miss and run the group again, and it
+// would be written even when the session disabled the query cache.
+// Example key: "<query id>|.../{rowset}_g0_10002|<column>|<query semantic>".
+class QueryGroupResults {
+public:
+    static QueryGroupResults* instance();
+
+    // `query` is the current query's context, `key` must already name the query (see make_key).
+    std::shared_ptr<roaring::Roaring> lookup(const std::string& key);
+    void insert(const std::string& key, const QueryContext* query,
+                std::shared_ptr<roaring::Roaring> bitmap);
+
+    static std::string make_key(const TUniqueId& query_id, std::string_view semantic_key);
+
+private:
+    struct Entry {
+        std::weak_ptr<const QueryContext> owner;
+        std::shared_ptr<roaring::Roaring> bitmap;
+    };
+    std::mutex _lock;
+    std::unordered_map<std::string, Entry> _entries;
+    size_t _purge_at = 64;
+};
 
 } // namespace doris::segment_v2

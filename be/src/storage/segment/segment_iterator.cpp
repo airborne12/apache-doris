@@ -1304,6 +1304,15 @@ bool SegmentIterator::_check_apply_by_inverted_index(std::shared_ptr<ColumnPredi
         }
     }
 
+    // A segment group index answers for the whole group, and a predicate whose bound moves during
+    // the query (TopN filter) cannot share one group result across the group's segments: every
+    // segment would run a group-sized query. Example: ORDER BY latency_ms DESC LIMIT 50 over 31
+    // grouped segments ran the latency_ms >= bound BKD range 31 times over the group; zone maps
+    // and the data evaluate it per segment instead.
+    if (pred->changes_during_query() && _segment->has_index_group()) {
+        return false;
+    }
+
     // UNTOKENIZED strings exceed ignore_above, they are written as null, causing range query errors
     if (PredicateTypeTraits::is_range(pred->type()) &&
         !IndexReaderHelper::has_bkd_index(_index_iterators[pred_column_id].get())) {

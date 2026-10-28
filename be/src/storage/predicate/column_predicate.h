@@ -375,6 +375,9 @@ public:
     // If false, it may still have been created by a runtime filter,
     // as certain filters like "in filter" generate key ranges instead of ColumnPredicate.
     virtual bool is_runtime_filter() const { return _can_ignore(); }
+    // Whether the predicate's value can change while the query runs (the TopN filter tightens its
+    // bound as rows arrive), so its index results differ from one segment to the next.
+    virtual bool changes_during_query() const { return false; }
 
 protected:
     virtual bool _can_ignore() const { return _runtime_filter_id != -1; }

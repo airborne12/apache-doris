@@ -44,6 +44,7 @@ public:
               _mtx(std::make_shared<std::shared_mutex>()),
               _nested(other._nested ? other._nested->clone(column_id) : nullptr) {}
     ~SharedPredicate() override = default;
+    bool changes_during_query() const override { return true; }
     std::string debug_string() const override {
         std::shared_lock<std::shared_mutex> lock(*_mtx);
         fmt::memory_buffer debug_string_buffer;
