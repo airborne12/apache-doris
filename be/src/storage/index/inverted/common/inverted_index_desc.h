@@ -55,6 +55,13 @@ public:
 
     static std::string get_index_file_name_v2(const std::string& rowset_id, int64_t seg_id);
 
+    // Segment group index: {rowset_id}_g{group_id}.idx, next to the rowset's segment files.
+    static std::string get_index_file_name_group(const std::string& rowset_id, int64_t group_id);
+    // Index path prefix of a group, derived from the path of any segment of the same rowset
+    // (they share a directory): ".../{rowset_id}_3.dat" -> ".../{rowset_id}_g{group_id}".
+    static std::string get_index_group_path_prefix(std::string_view any_segment_path,
+                                                   const std::string& rowset_id, int64_t group_id);
+
     static const char* get_temporary_null_bitmap_file_name() { return "null_bitmap"; }
     static const char* get_temporary_bkd_index_data_file_name() { return "bkd"; }
     static const char* get_temporary_bkd_index_meta_file_name() { return "bkd_meta"; }

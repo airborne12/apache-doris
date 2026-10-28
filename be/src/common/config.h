@@ -1495,6 +1495,12 @@ DECLARE_Int32(inverted_index_read_buffer_size);
 DECLARE_Int32(max_depth_in_bkd_tree);
 // index compaction
 DECLARE_mBool(inverted_index_compaction_enable);
+// Merge the SNII inverted and BKD indexes of consecutive segments of a compaction output rowset
+// into segment group index files ({rowset_id}_g{n}.idx), so a query opens one index per group
+// instead of one per segment.
+DECLARE_mBool(enable_inverted_index_segment_group);
+// Upper bound of the summed per-segment index bytes merged into one segment group index file.
+DECLARE_mInt64(inverted_index_group_max_bytes);
 // Only for debug, do not use in production
 DECLARE_mBool(debug_inverted_index_compaction);
 // index by RAM directory

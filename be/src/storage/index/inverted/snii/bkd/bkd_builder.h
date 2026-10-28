@@ -64,6 +64,13 @@ public:
     // a FileWriter and a ByteSink are the whole output surface (D2).
     Status finish(io::FileWriter* data_out, ByteSink* index_out, BkdStats* stats);
 
+    // Builds from an already ordered point stream instead of add()ed points, e.g. the k-way
+    // merge of sealed indexes a segment group merge feeds. `doc_count` is the number of
+    // distinct documents the stream covers, which a merged stream (value order, not doc order)
+    // cannot count itself. Consumes the builder like finish(); add() must not have been called.
+    Status finish_from_source(PointSource* source, uint32_t doc_count, io::FileWriter* data_out,
+                              ByteSink* index_out, BkdStats* stats);
+
 private:
     explicit BkdBuilder(const BkdBuilderOptions& options);
 

@@ -449,6 +449,10 @@ void RowsetMeta::merge_rowset_meta(const RowsetMeta& other) {
     // so we do not expect either side to be aggregated here.
     DCHECK(!is_segments_key_bounds_aggregated() && !other.is_segments_key_bounds_aggregated())
             << "merge_rowset_meta encountered aggregated key bounds";
+    // Appending the other rowset's per-segment index file entries below would land them after
+    // the group entries of a grouped rowset. Groups are only produced by compaction and this
+    // merge only runs for a publishing load rowset, so neither side can be grouped.
+    DORIS_CHECK(!has_inverted_index_groups() && !other.has_inverted_index_groups());
     if (_rowset_meta_pb.num_segment_rows_size() > 0) {
         if (other.num_segments() > 0) {
             if (other._rowset_meta_pb.num_segment_rows_size() > 0) {
@@ -517,6 +521,37 @@ void RowsetMeta::add_inverted_index_files_info(
         auto* new_file_info = _rowset_meta_pb.add_inverted_index_file_info();
         *new_file_info = *finfo;
     }
+}
+
+void RowsetMeta::set_inverted_index_groups(
+        const std::vector<int32_t>& segment_counts,
+        const std::vector<InvertedIndexFileInfo>& group_file_infos) {
+    DORIS_CHECK(!segment_counts.empty());
+    DORIS_CHECK_EQ(segment_counts.size(), group_file_infos.size());
+    int64_t covered = 0;
+    for (const auto count : segment_counts) {
+        DORIS_CHECK_GT(count, 0);
+        covered += count;
+    }
+    DORIS_CHECK_EQ(covered, num_segments());
+    _rowset_meta_pb.set_enable_inverted_index_file_info(true);
+    _rowset_meta_pb.clear_inverted_index_file_info();
+    for (int64_t pos = 0; pos < num_segments(); ++pos) {
+        _rowset_meta_pb.add_inverted_index_file_info();
+    }
+    for (const auto& info : group_file_infos) {
+        *_rowset_meta_pb.add_inverted_index_file_info() = info;
+    }
+    _rowset_meta_pb.mutable_inverted_index_group_segment_counts()->Assign(segment_counts.cbegin(),
+                                                                          segment_counts.cend());
+    update_metadata_size();
+}
+
+InvertedIndexFileInfo RowsetMeta::inverted_index_group_file_info(int32_t group_id) const {
+    const int group_count = _rowset_meta_pb.inverted_index_group_segment_counts_size();
+    DORIS_CHECK(group_id >= 0 && group_id < group_count);
+    DORIS_CHECK_EQ(_rowset_meta_pb.inverted_index_file_info_size(), num_segments() + group_count);
+    return _rowset_meta_pb.inverted_index_file_info(cast_set<int>(num_segments() + group_id));
 }
 
 bool operator==(const RowsetMeta& a, const RowsetMeta& b) {

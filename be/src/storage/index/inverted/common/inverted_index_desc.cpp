@@ -89,4 +89,20 @@ std::string InvertedIndexDescriptor::get_index_file_name_v2(const std::string& r
     return fmt::format("{}_{}{}", rowset_id, seg_id, index_suffix);
 }
 
+std::string InvertedIndexDescriptor::get_index_file_name_group(const std::string& rowset_id,
+                                                               int64_t group_id) {
+    return fmt::format("{}_g{}{}", rowset_id, group_id, index_suffix);
+}
+
+std::string InvertedIndexDescriptor::get_index_group_path_prefix(std::string_view any_segment_path,
+                                                                 const std::string& rowset_id,
+                                                                 int64_t group_id) {
+    CHECK(any_segment_path.ends_with(segment_suffix));
+    const size_t slash = any_segment_path.rfind('/');
+    const std::string_view dir = slash == std::string_view::npos
+                                         ? std::string_view {}
+                                         : any_segment_path.substr(0, slash + 1);
+    return fmt::format("{}{}_g{}", dir, rowset_id, group_id);
+}
+
 } // namespace doris::segment_v2

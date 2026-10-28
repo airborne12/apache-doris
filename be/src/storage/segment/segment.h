@@ -27,6 +27,7 @@
 #include <functional>
 #include <map>
 #include <memory> // for unique_ptr
+#include <optional>
 #include <string>
 #include <unordered_map>
 
@@ -43,6 +44,7 @@
 #include "io/io_common.h"
 #include "runtime/descriptors.h"
 #include "storage/cache/page_cache.h"
+#include "storage/index/inverted/common/index_group_slice.h"
 #include "storage/olap_common.h"
 #include "storage/schema.h"
 #include "storage/segment/page_handle.h"
@@ -104,6 +106,15 @@ public:
                        const io::IOContext* io_ctx = nullptr);
 
     static io::UInt128Wrapper file_cache_key(std::string_view rowset_id, uint32_t seg_id);
+
+    // Points this segment's index reads at its segment group index file. Called right after
+    // open(), before any index is read.
+    void set_index_group(std::string group_prefix, InvertedIndexFileInfo group_file_info,
+                         const IndexGroupSlice& slice) {
+        _index_group_prefix = std::move(group_prefix);
+        _idx_file_info = std::move(group_file_info);
+        _index_group_slice = slice;
+    }
     io::UInt128Wrapper file_cache_key() const {
         return file_cache_key(_rowset_id.to_string(), _segment_id);
     }
@@ -380,6 +391,10 @@ private:
     DorisCallOnce<Status> _index_file_reader_open;
 
     InvertedIndexFileInfo _idx_file_info;
+    // Set for a segment of a grouped rowset (RowsetMetaPB.inverted_index_group_segment_counts):
+    // its inverted/BKD indexes live in the group file at this prefix, at this slice.
+    std::string _index_group_prefix;
+    std::optional<IndexGroupSlice> _index_group_slice;
     int64_t _tablet_id = -1;
 
     int _be_exec_version = BeExecVersionManager::get_newest_version();

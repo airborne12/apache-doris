@@ -191,6 +191,14 @@ void Rowset::merge_rowset_meta(const RowsetMeta& other) {
 
 std::vector<std::string> Rowset::get_index_file_names() {
     std::vector<std::string> file_names;
+    if (rowset_meta()->has_inverted_index_groups()) {
+        for (int group_id = 0;
+             group_id < rowset_meta()->inverted_index_group_segment_counts().size(); ++group_id) {
+            file_names.push_back(InvertedIndexDescriptor::get_index_file_name_group(
+                    rowset_id().to_string(), group_id));
+        }
+        return file_names;
+    }
     for (auto seg : segments()) {
         auto segment_file_names = seg.index_file_names();
         file_names.insert(file_names.end(), segment_file_names.begin(), segment_file_names.end());

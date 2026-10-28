@@ -416,9 +416,16 @@ Status Segment::_open(OlapReaderStatistics* stats, const io::IOContext* source_i
 Status Segment::_open_index_file_reader() {
     // Derive the index path from `_seg_path`, not `_file_reader->path()`: remote FS normalizes the
     // latter to an absolute path that won't match the relative keys in PackedFileSystem's index map.
+    std::string prefix =
+            _index_group_slice.has_value()
+                    ? _index_group_prefix
+                    : std::string {InvertedIndexDescriptor::get_index_file_path_prefix(_seg_path)};
     _index_file_reader = std::make_shared<IndexFileReader>(
-            _fs, std::string {InvertedIndexDescriptor::get_index_file_path_prefix(_seg_path)},
-            _tablet_schema->get_inverted_index_storage_format(), _idx_file_info, _tablet_id);
+            _fs, std::move(prefix), _tablet_schema->get_inverted_index_storage_format(),
+            _idx_file_info, _tablet_id);
+    if (_index_group_slice.has_value()) {
+        _index_file_reader->set_group_slice(*_index_group_slice);
+    }
     return Status::OK();
 }
 

@@ -18,13 +18,16 @@
 #include "storage/index/inverted/snii/snii_bkd_index_writer.h"
 
 #include <cstring>
+#include <roaring/roaring.hh>
 #include <utility>
 
 #include "common/check.h"
 #include "storage/index/index_file_writer.h"
 #include "storage/index/inverted/snii/bkd/bkd_types.h"
+#include "storage/index/inverted/snii/bkd/group_merge_source.h"
 #include "storage/index/inverted/snii/format/metadata_directory.h"
 #include "storage/index/inverted/snii/format/null_bitmap.h"
+#include "storage/index/inverted/snii/snii_bkd_searcher.h"
 #include "storage/index/inverted/snii/writer/snii_compound_writer.h"
 #include "storage/key_coder.h"
 #include "storage/tablet/tablet_schema.h"
@@ -218,6 +221,80 @@ Status SniiBkdIndexColumnWriter::finish() {
     return _index_file_writer->add_snii_blob_index(_index_meta,
                                                    ::doris::snii::format::LogicalIndexKind::kBkd,
                                                    {std::move(cold)}, std::move(hot));
+}
+
+Status merge_snii_bkd_index_into_group(
+        const std::vector<const ::doris::snii::bkd::BkdSearcher*>& sources,
+        const std::vector<uint32_t>& doc_offsets, uint32_t group_rows, FieldType value_type,
+        const TabletIndex* index_meta, IndexFileWriter* group_writer) {
+    DORIS_CHECK_EQ(sources.size(), doc_offsets.size());
+    DORIS_CHECK(group_writer != nullptr);
+    if (!field_is_numeric_type(value_type) || get_key_coder(value_type) == nullptr) {
+        return Status::Error<ErrorCode::INVERTED_INDEX_NOT_SUPPORTED>(
+                "SNII BKD group merge does not support field type {}",
+                static_cast<int>(value_type));
+    }
+    const auto bytes_per_dim = cast_set<uint32_t>(field_type_size(value_type));
+
+    std::vector<const ::doris::snii::bkd::BkdReader*> readers;
+    std::vector<uint32_t> null_docids;
+    uint64_t doc_count = 0;
+    for (size_t i = 0; i < sources.size(); ++i) {
+        const auto* searcher = sources[i];
+        DORIS_CHECK(searcher != nullptr && searcher->reader != nullptr);
+        readers.push_back(searcher->reader.get());
+        doc_count += searcher->reader->doc_count();
+        if (searcher->null_bitmap_length > 0) {
+            std::vector<uint8_t> bytes;
+            RETURN_IF_ERROR(searcher->reader->reader()->read_at(
+                    searcher->null_bitmap_offset, searcher->null_bitmap_length, &bytes));
+            ::doris::snii::format::NullBitmapReader null_reader;
+            RETURN_IF_ERROR(::doris::snii::format::NullBitmapReader::open(
+                    ::doris::snii::Slice(bytes), &null_reader));
+            roaring::Roaring nulls;
+            null_reader.copy_to(&nulls);
+            for (const uint32_t docid : nulls) {
+                null_docids.push_back(docid + doc_offsets[i]);
+            }
+        }
+    }
+    DORIS_CHECK_LE(doc_count, static_cast<uint64_t>(group_rows));
+
+    ::doris::snii::bkd::BkdBuilderOptions options;
+    options.bytes_per_dim = bytes_per_dim;
+    options.field_type = value_type;
+    std::unique_ptr<::doris::snii::bkd::BkdBuilder> builder;
+    RETURN_IF_ERROR(::doris::snii::bkd::BkdBuilder::create(options, &builder));
+
+    std::unique_ptr<::doris::snii::bkd::StagedBlobFile> data;
+    RETURN_IF_ERROR(::doris::snii::bkd::StagedBlobFile::create(kDataFileName, &data));
+    ::doris::snii::ByteSink index_sink;
+    ::doris::snii::bkd::BkdStats stats;
+    ::doris::snii::bkd::GroupBkdMergeSource merged(std::move(readers), doc_offsets, bytes_per_dim);
+    RETURN_IF_ERROR(builder->finish_from_source(&merged, cast_set<uint32_t>(doc_count), data.get(),
+                                                &index_sink, &stats));
+    RETURN_IF_ERROR(data->finalize());
+
+    ::doris::snii::format::NullBitmapWriter null_writer;
+    null_writer.add_many(null_docids);
+    ::doris::snii::ByteSink null_sink;
+    RETURN_IF_ERROR(null_writer.finish(group_rows, &null_sink));
+
+    std::shared_ptr<::doris::snii::bkd::StagedBlobFile> staged = std::move(data);
+    ::doris::snii::writer::BlobFileSource cold;
+    cold.name = kDataFileName;
+    cold.length = staged->bytes_written();
+    cold.read_fn = [staged = std::move(staged)](uint64_t offset, size_t len, uint8_t* out) {
+        return staged->read_at(offset, len, out);
+    };
+    std::vector<::doris::snii::writer::BlobFileSource> hot;
+    hot.push_back(resident_source(kIndexFileName,
+                                  std::make_shared<std::vector<uint8_t>>(index_sink.take())));
+    hot.push_back(resident_source(kNullsFileName,
+                                  std::make_shared<std::vector<uint8_t>>(null_sink.take())));
+    return group_writer->add_snii_blob_index(index_meta,
+                                             ::doris::snii::format::LogicalIndexKind::kBkd,
+                                             {std::move(cold)}, std::move(hot));
 }
 
 void SniiBkdIndexColumnWriter::close_on_error() {

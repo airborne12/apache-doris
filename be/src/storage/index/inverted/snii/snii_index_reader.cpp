@@ -260,7 +260,11 @@ Status SniiIndexReader::_run_gram(const IndexQueryContextPtr& context, OpenedInd
     ::doris::snii::query::GramGateStats gate_stats;
     auto result = std::make_shared<roaring::Roaring>();
     RETURN_IF_ERROR(::doris::snii::query::gram_boolean_query(
-            source, gram_query, cast_set<uint32_t>(_rows_of_segment), result.get(), &gate_stats));
+            source, gram_query,
+            // Over a segment group index the doc domain is the group's, not this segment's.
+            _group_slice.has_value() ? _group_slice->group_rows
+                                     : cast_set<uint32_t>(_rows_of_segment),
+            result.get(), &gate_stats));
     context->stats->gram_index_gate_gave_up += static_cast<int64_t>(gate_stats.nodes_given_up);
     result->runOptimize();
     *out = std::move(result);
@@ -356,8 +360,11 @@ Status SniiIndexReader::_read_snii_null_bitmap(
         const ::doris::snii::reader::LogicalIndexReader* preopened_reader) {
     SCOPED_RAW_TIMER(&context->stats->inverted_index_query_null_bitmap_timer);
     auto index_file_key = _index_file_reader->get_index_file_cache_key(&_index_meta);
+    // A segment group index holds the group's null rows; this segment's slice is cached apart.
     InvertedIndexQueryCache::CacheKey cache_key {
-            index_file_key, "", InvertedIndexQueryType::UNKNOWN_QUERY, "null_bitmap"};
+            index_file_key, "", InvertedIndexQueryType::UNKNOWN_QUERY,
+            _group_slice.has_value() ? "null_bitmap" + _group_slice->cache_suffix()
+                                     : std::string("null_bitmap")};
     auto* cache = InvertedIndexQueryCache::instance();
     if (cache->lookup(cache_key, cache_handle)) {
         return Status::OK();
@@ -381,6 +388,9 @@ Status SniiIndexReader::_read_snii_null_bitmap(
                                                                       &reader));
         reader.copy_to(null_bitmap.get());
         null_bitmap->runOptimize();
+    }
+    if (_group_slice.has_value()) {
+        null_bitmap = std::make_shared<roaring::Roaring>(_group_slice->to_segment(*null_bitmap));
     }
     cache->insert(cache_key, null_bitmap, cache_handle);
     return Status::OK();

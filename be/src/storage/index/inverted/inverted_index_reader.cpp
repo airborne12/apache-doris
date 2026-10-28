@@ -45,6 +45,17 @@ Status InvertedIndexReader::query_with_null_bitmap(
     return read_null_bitmap(context, null_bitmap_cache_handle);
 }
 
+InvertedIndexReader::InvertedIndexReader(const TabletIndex* index_meta,
+                                         std::shared_ptr<IndexFileReader> index_file_reader,
+                                         uint64_t rows_of_segment, bool column_is_array)
+        : _index_file_reader(std::move(index_file_reader)),
+          _index_meta(*index_meta),
+          _rows_of_segment(rows_of_segment),
+          _column_is_array(column_is_array),
+          // Readers built without a file (mocks in IndexReaderHelperTest) have no slice.
+          _group_slice(_index_file_reader != nullptr ? _index_file_reader->group_slice()
+                                                     : std::nullopt) {}
+
 bool InvertedIndexReader::handle_query_cache(const IndexQueryContextPtr& context,
                                              InvertedIndexQueryCache* cache,
                                              const InvertedIndexQueryCache::CacheKey& cache_key,

@@ -19,6 +19,7 @@
 
 #include <functional>
 #include <memory>
+#include <optional>
 #include <string>
 #include <string_view>
 #include <utility>
@@ -32,6 +33,7 @@
 #include "storage/index/index_query_context.h"
 #include "storage/index/index_reader.h"
 #include "storage/index/inverted/analysis/inverted_index_parser.h"
+#include "storage/index/inverted/common/index_group_slice.h"
 #include "storage/index/inverted/common/inverted_index_cache.h"
 #include "storage/index/inverted/common/inverted_index_desc.h"
 #include "storage/index/inverted/common/inverted_index_query_type.h"
@@ -247,11 +249,7 @@ public:
     // them (0, false) never takes that path.
     explicit InvertedIndexReader(const TabletIndex* index_meta,
                                  std::shared_ptr<IndexFileReader> index_file_reader,
-                                 uint64_t rows_of_segment = 0, bool column_is_array = false)
-            : _index_file_reader(std::move(index_file_reader)),
-              _index_meta(*index_meta),
-              _rows_of_segment(rows_of_segment),
-              _column_is_array(column_is_array) {}
+                                 uint64_t rows_of_segment = 0, bool column_is_array = false);
     virtual ~InvertedIndexReader() = default;
 
 #ifdef BE_TEST
@@ -353,6 +351,9 @@ protected:
     bool _has_null = true;
     uint64_t _rows_of_segment = 0;
     bool _column_is_array = false;
+    // Set when _index_file_reader is a segment group index file: queries run in group docid space
+    // and their results are sliced back to this segment.
+    std::optional<IndexGroupSlice> _group_slice;
 #ifdef BE_TEST
     SingleFlightFollowerJoinedObserver _single_flight_follower_joined_observer = nullptr;
     void* _single_flight_follower_joined_opaque = nullptr;

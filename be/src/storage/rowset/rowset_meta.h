@@ -529,6 +529,19 @@ public:
     void add_inverted_index_files_info(
             const std::vector<const InvertedIndexFileInfo*>& idx_file_info);
 
+    // Segment group index layout, see RowsetMetaPB.inverted_index_group_segment_counts.
+    bool has_inverted_index_groups() const {
+        return _rowset_meta_pb.inverted_index_group_segment_counts_size() > 0;
+    }
+    const auto& inverted_index_group_segment_counts() const {
+        return _rowset_meta_pb.inverted_index_group_segment_counts();
+    }
+    // Switches this rowset to the group layout: the per-position index file entries become empty
+    // (those files are gone) and one entry per group is appended after them.
+    void set_inverted_index_groups(const std::vector<int32_t>& segment_counts,
+                                   const std::vector<InvertedIndexFileInfo>& group_file_infos);
+    InvertedIndexFileInfo inverted_index_group_file_info(int32_t group_id) const;
+
     int64_t get_metadata_size() const override;
 
     // Because the member field '_handle' is a raw pointer, use member func 'init' to replace copy ctor

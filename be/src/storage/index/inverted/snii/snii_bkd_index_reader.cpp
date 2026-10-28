@@ -21,6 +21,7 @@
 #include "runtime/runtime_state.h"
 #include "storage/index/bkd_field_encoding.h"
 #include "storage/index/index_file_reader.h"
+#include "storage/index/inverted/common/index_group_slice.h"
 #include "storage/index/inverted/inverted_index_iterator.h"
 #include "storage/index/inverted/snii/format/null_bitmap.h"
 #include "storage/index/inverted/snii/searcher_cache_value.h"
@@ -136,6 +137,28 @@ Status SniiBkdIndexReader::query(const IndexQueryContextPtr& context,
                                                  query_str};
     auto* cache = InvertedIndexQueryCache::instance();
     InvertedIndexQueryCacheHandle cache_handler;
+    // Over a segment group index the range runs once per group and query: its group-space
+    // bitmap is kept under a query-scoped key (see query_scoped_group_path) and every segment of
+    // the group takes its slice.
+    if (_group_slice.has_value()) {
+        const InvertedIndexQueryCache::CacheKey group_key(
+                query_scoped_group_path(index_file_key, context->runtime_state->query_id()),
+                column_name, query_type, query_str);
+        InvertedIndexQueryCacheHandle group_handle;
+        std::shared_ptr<roaring::Roaring> group_bitmap;
+        if (cache->lookup(group_key, &group_handle)) {
+            group_bitmap = group_handle.get_bitmap();
+        } else {
+            group_bitmap = std::make_shared<roaring::Roaring>();
+            RETURN_IF_ERROR(searcher->reader->range(bounds.lower, bounds.lower_inclusive,
+                                                    bounds.upper, bounds.upper_inclusive,
+                                                    group_bitmap.get()));
+            group_bitmap->runOptimize();
+            cache->insert(group_key, group_bitmap, &group_handle);
+        }
+        bit_map = std::make_shared<roaring::Roaring>(_group_slice->to_segment(*group_bitmap));
+        return Status::OK();
+    }
     if (handle_query_cache(context, cache, cache_key, &cache_handler, bit_map)) {
         return Status::OK();
     }
@@ -169,6 +192,11 @@ Status SniiBkdIndexReader::try_query(const IndexQueryContextPtr& context,
     uint64_t estimate = 0;
     RETURN_IF_ERROR(searcher->reader->estimate_cardinality(
             bounds.lower, bounds.lower_inclusive, bounds.upper, bounds.upper_inclusive, &estimate));
+    // The caller compares the estimate with this segment's rows; a group estimate is scaled to
+    // the segment's share of the group.
+    if (_group_slice.has_value() && _group_slice->group_rows > 0) {
+        estimate = estimate * _group_slice->rows / _group_slice->group_rows;
+    }
     *count = estimate;
     return Status::OK();
 }
@@ -178,7 +206,9 @@ Status SniiBkdIndexReader::read_null_bitmap(const IndexQueryContextPtr& context,
     SCOPED_RAW_TIMER(&context->stats->inverted_index_query_null_bitmap_timer);
     auto index_file_key = _index_file_reader->get_index_file_cache_key(&_index_meta);
     InvertedIndexQueryCache::CacheKey cache_key {
-            index_file_key, "", InvertedIndexQueryType::UNKNOWN_QUERY, "null_bitmap"};
+            index_file_key, "", InvertedIndexQueryType::UNKNOWN_QUERY,
+            _group_slice.has_value() ? "null_bitmap" + _group_slice->cache_suffix()
+                                     : std::string("null_bitmap")};
     auto* cache = InvertedIndexQueryCache::instance();
     if (cache->lookup(cache_key, cache_handle)) {
         return Status::OK();
@@ -208,6 +238,9 @@ Status SniiBkdIndexReader::read_null_bitmap(const IndexQueryContextPtr& context,
                                                                       &reader));
         reader.copy_to(null_bitmap.get());
         null_bitmap->runOptimize();
+    }
+    if (_group_slice.has_value()) {
+        null_bitmap = std::make_shared<roaring::Roaring>(_group_slice->to_segment(*null_bitmap));
     }
     cache->insert(cache_key, null_bitmap, cache_handle);
     return Status::OK();

@@ -29,6 +29,10 @@
 #include "storage/index/inverted/snii/encoding/byte_sink.h"
 #include "storage/olap_common.h"
 
+namespace doris::snii::bkd {
+struct BkdSearcher;
+} // namespace doris::snii::bkd
+
 namespace doris {
 class KeyCoder;
 class TabletIndex;
@@ -97,6 +101,16 @@ private:
     // whole rowset has been closed. finish() therefore hands the file to the
     // read callback and keeps no reference of its own.
 };
+
+// Writes the segment group BKD index of `index_meta` into `group_writer`: the k-way merge of the
+// sealed per-segment indexes `sources` (positions of one group, in order), with source i's doc
+// ids shifted by doc_offsets[i]. `group_rows` is the group's row count, the null bitmap's domain.
+// Produces the same three sub-files as SniiBkdIndexColumnWriter::finish(), so the group file is
+// read by the unchanged SniiBkdIndexReader.
+Status merge_snii_bkd_index_into_group(
+        const std::vector<const ::doris::snii::bkd::BkdSearcher*>& sources,
+        const std::vector<uint32_t>& doc_offsets, uint32_t group_rows, FieldType value_type,
+        const TabletIndex* index_meta, IndexFileWriter* group_writer);
 
 } // namespace segment_v2
 } // namespace doris

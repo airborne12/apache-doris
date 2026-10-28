@@ -341,6 +341,20 @@ Status BkdBuilder::reserve_points(size_t point_count) {
     return Status::OK();
 }
 
+Status BkdBuilder::finish_from_source(PointSource* source, uint32_t doc_count,
+                                      io::FileWriter* data_out, ByteSink* index_out,
+                                      BkdStats* stats) {
+    DORIS_CHECK(source != nullptr);
+    DORIS_CHECK(data_out != nullptr);
+    DORIS_CHECK(index_out != nullptr);
+    DORIS_CHECK(stats != nullptr);
+    DORIS_CHECK(!finished_);
+    DORIS_CHECK(records_.empty() && run_paths_.empty() && doc_count_ == 0);
+    finished_ = true;
+    doc_count_ = doc_count;
+    return write_index(source, data_out, index_out, stats);
+}
+
 Status BkdBuilder::write_index(PointSource* source, io::FileWriter* data_out, ByteSink* index_out,
                                BkdStats* stats) {
     // bytes_written() is the offset truth (io/file_writer.h), so the leaf directory is

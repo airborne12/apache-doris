@@ -108,6 +108,12 @@ public:
     // Includes this object and its decoded index arrays.
     size_t memory_usage() const { return sizeof(*this) + block_.heap_bytes(); }
 
+    // Reads and decodes leaf `index` whole. Leaves ascend by (value, doc_id), so visiting
+    // 0..leaf_count()-1 replays every point in index order; the segment group merge
+    // (GroupBkdMergeSource) uses this to treat a sealed index as one sorted run. `out`'s
+    // slices view `*bytes`.
+    Status decode_leaf(uint32_t index, std::vector<uint8_t>* bytes, DecodedLeafBlock* out) const;
+
 private:
     BkdReader(io::FileReader* file, const BkdSections& sections);
 

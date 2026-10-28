@@ -65,6 +65,7 @@
 #include "storage/compaction/cumulative_compaction_changelog_policy.h"
 #include "storage/compaction/cumulative_compaction_policy.h"
 #include "storage/compaction/cumulative_compaction_time_series_policy.h"
+#include "storage/compaction/inverted_index_group_builder.h"
 #include "storage/compaction_task_tracker.h"
 #include "storage/data_dir.h"
 #include "storage/index/index_file_reader.h"
@@ -444,6 +445,10 @@ Status Compaction::finish_merge_input_rowsets_execution(MergeInputRowsetsContext
                 _cur_tablet_schema->copy_without_variant_extracted_columns());
     }
 
+    // The per-segment index files are closed by build() and the rowset is not visible yet, which
+    // is the window where their indexes can be merged into segment group index files.
+    RETURN_IF_ERROR(InvertedIndexGroupBuilder::build(_output_rowset, _tablet->tablet_id()));
+
     //RETURN_IF_ERROR(_engine.meta_mgr().commit_rowset(*_output_rowset->rowset_meta().get()));
     set_delete_predicate_for_output_rowset();
     update_output_rowset_after_build(result);
@@ -689,6 +694,13 @@ bool CompactionMixin::handle_ordered_data_compaction() {
     if (_changelog_ttl_cutoff_tso >= 0 &&
         std::ranges::any_of(_input_rowsets, [this](const RowsetSharedPtr& rowset) {
             return changelog_rowset_expired(*rowset->rowset_meta(), _changelog_ttl_cutoff_tso);
+        })) {
+        return false;
+    }
+    // Link compaction renumbers the input segments into the output rowset, which would detach
+    // them from the input's segment group index files.
+    if (std::ranges::any_of(_input_rowsets, [](const RowsetSharedPtr& rowset) {
+            return rowset->rowset_meta()->has_inverted_index_groups();
         })) {
         return false;
     }
@@ -1611,6 +1623,13 @@ static bool check_rowset_has_inverted_index(const RowsetSharedPtr& src_rs, int32
 void Compaction::construct_index_compaction_columns(RowsetWriterContext& ctx) {
     if (_cur_tablet_schema->get_inverted_index_storage_format() ==
         InvertedIndexStorageFormatPB::SNII) {
+        // SNII index compaction merges per-segment index files; a segment group index input has
+        // none, so its output indexes are rebuilt from the data by the segment writer instead.
+        if (std::any_of(_input_rowsets.begin(), _input_rowsets.end(), [](const auto& rowset) {
+                return rowset->rowset_meta()->has_inverted_index_groups();
+            })) {
+            return;
+        }
         std::map<std::string, std::unique_ptr<IndexFileReader>> source_file_readers;
         for (const auto& destination_index : _cur_tablet_schema->inverted_indexes()) {
             const auto& col_unique_ids = destination_index->col_unique_ids();

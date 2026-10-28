@@ -41,6 +41,7 @@
 #include "io/fs/path.h"
 #include "io/fs/remote_file_system.h"
 #include "storage/index/index_file_reader.h"
+#include "storage/index/inverted/common/index_group_slice.h"
 #include "storage/index/inverted/common/inverted_index_cache.h"
 #include "storage/index/inverted/common/inverted_index_desc.h"
 #include "storage/olap_common.h"
@@ -48,6 +49,7 @@
 #include "storage/rowset/beta_rowset.h"
 #include "storage/rowset/beta_rowset_reader.h"
 #include "storage/rowset/rowset.h"
+#include "storage/rowset/rowset_index_groups.h"
 #include "storage/segment/segment_loader.h"
 #include "storage/tablet/tablet_schema.h"
 #include "storage/utils.h"
@@ -183,6 +185,23 @@ Status BetaRowset::get_segment_num_rows(std::vector<uint32_t>* segment_rows,
     return Status::OK();
 }
 
+namespace {
+// The segment group index files of a grouped rowset, next to `any_segment_path`, named after
+// `rowset_id`: [.../{rowset_id}_g0.idx, .../{rowset_id}_g1.idx, ...].
+std::vector<std::string> index_group_file_paths(const RowsetMeta& meta,
+                                                const std::string& any_segment_path,
+                                                const std::string& rowset_id) {
+    std::vector<std::string> paths;
+    for (int group_id = 0; group_id < meta.inverted_index_group_segment_counts().size();
+         ++group_id) {
+        paths.push_back(InvertedIndexDescriptor::get_index_file_path_v2(
+                InvertedIndexDescriptor::get_index_group_path_prefix(any_segment_path, rowset_id,
+                                                                     group_id)));
+    }
+    return paths;
+}
+} // namespace
+
 Status BetaRowset::get_inverted_index_size(int64_t* index_size) {
     const auto& fs = _rowset_meta->fs();
     if (!fs) {
@@ -190,6 +209,16 @@ Status BetaRowset::get_inverted_index_size(int64_t* index_size) {
                                           _rowset_meta->resource_id());
     }
 
+    if (_rowset_meta->has_inverted_index_groups()) {
+        auto seg_path = DORIS_TRY(segment(0).path());
+        for (const auto& path :
+             index_group_file_paths(*_rowset_meta, seg_path, rowset_id().to_string())) {
+            int64_t file_size = 0;
+            RETURN_IF_ERROR(fs->file_size(path, &file_size));
+            *index_size += file_size;
+        }
+        return Status::OK();
+    }
     if (_schema->get_inverted_index_storage_format() == InvertedIndexStorageFormatPB::V1) {
         for (const auto& index : _schema->inverted_indexes()) {
             for (auto seg : segments()) {
@@ -225,7 +254,20 @@ void BetaRowset::clear_inverted_index_cache() {
             continue;
         }
 
-        auto index_path_prefix = InvertedIndexDescriptor::get_index_file_path_prefix(*seg_path);
+        // A grouped rowset's searchers are cached under the group file of each segment's group.
+        std::string index_path_prefix {
+                InvertedIndexDescriptor::get_index_file_path_prefix(*seg_path)};
+        if (_rowset_meta->has_inverted_index_groups()) {
+            std::vector<uint32_t> segment_rows;
+            _rowset_meta->get_num_segment_rows(&segment_rows);
+            const RowsetIndexGroups groups(
+                    {_rowset_meta->inverted_index_group_segment_counts().begin(),
+                     _rowset_meta->inverted_index_group_segment_counts().end()},
+                    segment_rows);
+            index_path_prefix = InvertedIndexDescriptor::get_index_group_path_prefix(
+                    *seg_path, rowset_id().to_string(),
+                    groups.group_of(cast_set<int64_t>(seg.pos())));
+        }
         for (const auto& column : tablet_schema()->columns()) {
             auto index_metas = tablet_schema()->inverted_indexs(*column);
             for (const auto& index_meta : index_metas) {
@@ -301,6 +343,21 @@ Status BetaRowset::load_segment(RowsetSegmentRef seg, OlapReaderStatistics* stat
                      << " : " << s.to_string();
         return s;
     }
+    if (_rowset_meta->has_inverted_index_groups()) {
+        std::vector<uint32_t> segment_rows;
+        _rowset_meta->get_num_segment_rows(&segment_rows);
+        const RowsetIndexGroups groups({_rowset_meta->inverted_index_group_segment_counts().begin(),
+                                        _rowset_meta->inverted_index_group_segment_counts().end()},
+                                       segment_rows);
+        const auto pos = cast_set<int64_t>(seg.pos);
+        const int32_t group_id = groups.group_of(pos);
+        (*segment)->set_index_group(InvertedIndexDescriptor::get_index_group_path_prefix(
+                                            seg_path, rowset_id().to_string(), group_id),
+                                    _rowset_meta->inverted_index_group_file_info(group_id),
+                                    IndexGroupSlice {.offset = groups.offset_of(pos),
+                                                     .rows = segment_rows[pos],
+                                                     .group_rows = groups.group_rows(group_id)});
+    }
     return Status::OK();
 }
 
@@ -351,7 +408,8 @@ Status BetaRowset::remove() {
                 }
             }
         } else {
-            if (_schema->has_inverted_or_ann_index()) {
+            if (_schema->has_inverted_or_ann_index() &&
+                !_rowset_meta->has_inverted_index_groups()) {
                 std::string inverted_index_file = InvertedIndexDescriptor::get_index_file_path_v2(
                         InvertedIndexDescriptor::get_index_file_path_prefix(seg_path));
                 st = fs->delete_file(inverted_index_file);
@@ -359,6 +417,19 @@ Status BetaRowset::remove() {
                     LOG(WARNING) << st.to_string();
                     success = false;
                 }
+            }
+        }
+    }
+    if (_rowset_meta->has_inverted_index_groups()) {
+        for (const auto& path : index_group_file_paths(
+                     *_rowset_meta,
+                     local_segment_path(_tablet_path, rowset_id().to_string(), segment(0).id()),
+                     rowset_id().to_string())) {
+            LOG(INFO) << "deleting " << path;
+            st = fs->delete_file(path);
+            if (!st.ok()) {
+                LOG(WARNING) << st.to_string();
+                success = false;
             }
         }
     }
@@ -464,6 +535,7 @@ Status BetaRowset::link_files_to(const std::string& dir, RowsetId new_rowset_id,
             }
         } else {
             if ((_schema->has_inverted_or_ann_index()) &&
+                !_rowset_meta->has_inverted_index_groups() &&
                 (without_index_uids == nullptr || without_index_uids->empty())) {
                 std::string inverted_index_file_src =
                         InvertedIndexDescriptor::get_index_file_path_v2(
@@ -488,6 +560,27 @@ Status BetaRowset::link_files_to(const std::string& dir, RowsetId new_rowset_id,
                 }
                 linked_success_files.push_back(inverted_index_file_dst);
             }
+        }
+    }
+    if (_rowset_meta->has_inverted_index_groups() &&
+        (without_index_uids == nullptr || without_index_uids->empty())) {
+        // Group files cover consecutive positions of THIS rowset, so the linked segments must
+        // keep their positions.
+        DORIS_CHECK_EQ(new_rowset_start_seg_id, 0);
+        const auto src = index_group_file_paths(
+                *_rowset_meta, local_segment_path(_tablet_path, rowset_id().to_string(), 0),
+                rowset_id().to_string());
+        const auto dst = index_group_file_paths(
+                *_rowset_meta, local_segment_path(dir, new_rowset_id.to_string(), 0),
+                new_rowset_id.to_string());
+        for (size_t i = 0; i < src.size(); ++i) {
+            if (!local_fs->link_file(src[i], dst[i]).ok()) {
+                status = Status::Error<OS_ERROR>(
+                        "fail to create hard link. from={}, to={}, errno={}", src[i], dst[i],
+                        Errno::no());
+                return status;
+            }
+            linked_success_files.push_back(dst[i]);
         }
     }
     return Status::OK();
@@ -530,7 +623,8 @@ Status BetaRowset::copy_files_to(const std::string& dir, const RowsetId& new_row
                 }
             }
         } else {
-            if (_schema->has_inverted_or_ann_index()) {
+            if (_schema->has_inverted_or_ann_index() &&
+                !_rowset_meta->has_inverted_index_groups()) {
                 std::string inverted_index_src_file =
                         InvertedIndexDescriptor::get_index_file_path_v2(
                                 InvertedIndexDescriptor::get_index_file_path_prefix(src_path));
@@ -542,6 +636,17 @@ Status BetaRowset::copy_files_to(const std::string& dir, const RowsetId& new_row
                 LOG(INFO) << "success to copy file. from=" << inverted_index_src_file << ", "
                           << "to=" << inverted_index_dst_file;
             }
+        }
+    }
+    if (_rowset_meta->has_inverted_index_groups()) {
+        const auto src = index_group_file_paths(
+                *_rowset_meta, local_segment_path(_tablet_path, rowset_id().to_string(), 0),
+                rowset_id().to_string());
+        const auto dst = index_group_file_paths(
+                *_rowset_meta, local_segment_path(dir, new_rowset_id.to_string(), 0),
+                new_rowset_id.to_string());
+        for (size_t i = 0; i < src.size(); ++i) {
+            RETURN_IF_ERROR(io::global_local_filesystem()->copy_path(src[i], dst[i]));
         }
     }
     return Status::OK();
@@ -588,7 +693,8 @@ Status BetaRowset::upload_to(const StorageResource& dest_fs, const RowsetId& new
                 }
             }
         } else {
-            if (_schema->has_inverted_or_ann_index()) {
+            if (_schema->has_inverted_or_ann_index() &&
+                !_rowset_meta->has_inverted_index_groups()) {
                 std::string remote_inverted_index_file =
                         InvertedIndexDescriptor::get_index_file_path_v2(
                                 InvertedIndexDescriptor::get_index_file_path_prefix(
@@ -601,6 +707,18 @@ Status BetaRowset::upload_to(const StorageResource& dest_fs, const RowsetId& new
                 local_paths.emplace_back(local_inverted_index_file);
             }
         }
+    }
+    if (_rowset_meta->has_inverted_index_groups()) {
+        const auto local = index_group_file_paths(
+                *_rowset_meta, local_segment_path(_tablet_path, rowset_id().to_string(), 0),
+                rowset_id().to_string());
+        const auto remote =
+                index_group_file_paths(*_rowset_meta,
+                                       dest_fs.remote_segment_path(_rowset_meta->tablet_id(),
+                                                                   new_rowset_id.to_string(), 0),
+                                       new_rowset_id.to_string());
+        local_paths.insert(local_paths.end(), local.begin(), local.end());
+        dest_paths.insert(dest_paths.end(), remote.begin(), remote.end());
     }
     auto st = dest_fs.fs->batch_upload(local_paths, dest_paths);
     if (st.ok()) {

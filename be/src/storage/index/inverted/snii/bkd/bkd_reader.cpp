@@ -498,6 +498,14 @@ Status BkdReader::estimate_cardinality(Slice lower, bool lower_inclusive, Slice 
     return Status::OK();
 }
 
+Status BkdReader::decode_leaf(uint32_t index, std::vector<uint8_t>* bytes,
+                              DecodedLeafBlock* out) const {
+    DORIS_CHECK_LT(index, block_.leaf_count());
+    RETURN_IF_ERROR(read_leaf(index, bytes));
+    return decode_leaf_block(Slice(*bytes), block_.header().bytes_per_dim, block_.leaf(index).count,
+                             out);
+}
+
 Status BkdReader::read_leaf(uint32_t index, std::vector<uint8_t>* buffer) const {
     const LeafRef leaf = block_.leaf(index);
     // Open-time validation bounds each leaf extent. The leaf decoder rejects an empty last block.

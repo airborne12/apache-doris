@@ -148,6 +148,14 @@ Status IndexBuilder::update_inverted_index_info() {
     _output_rowsets.reserve(_input_rowsets.size());
     _pending_rs_guards.reserve(_input_rowsets.size());
     for (auto&& input_rowset : _input_rowsets) {
+        // The SNII rewrite below reads and writes per-segment index files, which a segment group
+        // index rowset does not have; it must be compacted back to the segment layout first.
+        if (input_rowset->rowset_meta()->has_inverted_index_groups()) {
+            return Status::Error<ErrorCode::INVERTED_INDEX_NOT_SUPPORTED>(
+                    "BUILD/DROP INDEX does not support segment group index rowset {} yet; set "
+                    "enable_inverted_index_segment_group=false and run full compaction first",
+                    input_rowset->rowset_id().to_string());
+        }
         bool is_local_rowset = input_rowset->is_local();
         DBUG_EXECUTE_IF("IndexBuilder::update_inverted_index_info_is_local_rowset",
                         { is_local_rowset = false; })

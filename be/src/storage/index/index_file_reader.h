@@ -36,6 +36,7 @@
 #include <map>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <shared_mutex>
 #include <string>
 #include <unordered_map>
@@ -46,6 +47,7 @@
 #include "common/config.h"
 #include "io/fs/file_system.h"
 #include "storage/index/index_file_writer.h"
+#include "storage/index/inverted/common/index_group_slice.h"
 #include "storage/index/inverted/common/inverted_index_desc.h"
 #include "storage/index/inverted/snii/reader/logical_index_reader.h"
 #include "storage/index/inverted/snii/reader/snii_segment_reader.h"
@@ -135,6 +137,9 @@ public:
     }
     const std::string& get_index_path_prefix() const { return _index_path_prefix; }
     InvertedIndexStorageFormatPB get_storage_format() const { return _storage_format; }
+    // Set when this reader opens a segment group index file for one of the group's segments.
+    void set_group_slice(const IndexGroupSlice& slice) { _group_slice = slice; }
+    const std::optional<IndexGroupSlice>& group_slice() const { return _group_slice; }
     friend IndexFileWriter;
 
 protected:
@@ -151,6 +156,7 @@ private:
     std::unique_ptr<doris::snii::reader::SniiSegmentReader> _snii_segment_reader;
     const io::FileSystemSPtr _fs;
     std::string _index_path_prefix;
+    std::optional<IndexGroupSlice> _group_slice;
     int32_t _read_buffer_size = -1;
     InvertedIndexStorageFormatPB _storage_format;
     mutable std::shared_mutex _mutex; // Use mutable for const read operations

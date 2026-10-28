@@ -46,6 +46,7 @@
 #include "storage/olap_common.h"
 #include "storage/rowset/beta_rowset.h"
 #include "storage/rowset/rowset.h"
+#include "storage/rowset/rowset_index_groups.h"
 #include "storage/rowset/rowset_reader.h"
 #include "storage/segment/column_reader.h"
 #include "storage/segment/segment.h"
@@ -438,11 +439,38 @@ Status CollectionStatistics::process_segment(const RowsetSharedPtr& rowset,
     auto seg_path = DORIS_TRY(seg.path());
     auto rowset_meta = rowset->rowset_meta();
 
-    auto idx_file_reader = std::make_unique<IndexFileReader>(
-            rowset_meta->fs(),
-            std::string {InvertedIndexDescriptor::get_index_file_path_prefix(seg_path)},
-            tablet_schema->get_inverted_index_storage_format(), seg.inverted_index_file_info(),
-            rowset_meta->tablet_id());
+    // A grouped rowset holds one index per segment group, whose statistics cover all its
+    // segments: it is counted once, at the group's first position, and the others are skipped.
+    std::string index_path_prefix {InvertedIndexDescriptor::get_index_file_path_prefix(seg_path)};
+    InvertedIndexFileInfo index_file_info = seg.inverted_index_file_info();
+    std::vector<int64_t> hidden_positions {cast_set<int64_t>(seg.pos())};
+    std::vector<uint32_t> hidden_offsets {0};
+    if (rowset_meta->has_inverted_index_groups()) {
+        std::vector<uint32_t> segment_rows;
+        rowset_meta->get_num_segment_rows(&segment_rows);
+        const RowsetIndexGroups groups({rowset_meta->inverted_index_group_segment_counts().begin(),
+                                        rowset_meta->inverted_index_group_segment_counts().end()},
+                                       segment_rows);
+        const auto pos = cast_set<int64_t>(seg.pos());
+        const int32_t group_id = groups.group_of(pos);
+        if (groups.first_pos(group_id) != pos) {
+            return Status::OK();
+        }
+        index_path_prefix = InvertedIndexDescriptor::get_index_group_path_prefix(
+                seg_path, rowset->rowset_id().to_string(), group_id);
+        index_file_info = rowset_meta->inverted_index_group_file_info(group_id);
+        hidden_positions.clear();
+        hidden_offsets.clear();
+        for (int64_t p = pos; p < pos + groups.segment_count(group_id); ++p) {
+            hidden_positions.push_back(p);
+            hidden_offsets.push_back(groups.offset_of(p));
+        }
+    }
+
+    auto idx_file_reader =
+            std::make_unique<IndexFileReader>(rowset_meta->fs(), index_path_prefix,
+                                              tablet_schema->get_inverted_index_storage_format(),
+                                              index_file_info, rowset_meta->tablet_id());
     const bool is_snii =
             idx_file_reader->get_storage_format() == InvertedIndexStorageFormatPB::SNII;
     auto init_status = idx_file_reader->init(config::inverted_index_read_buffer_size, io_ctx);
@@ -460,8 +488,17 @@ Status CollectionStatistics::process_segment(const RowsetSharedPtr& rowset,
     // query's memory.
     DorisVector<uint32_t> hidden_docs;
     if (hidden_rows != nullptr) {
-        RETURN_IF_ERROR(collect_hidden_docs(rowset, seg, *tablet_schema, *hidden_rows, io_ctx,
-                                            &hidden_docs));
+        // Positions ascend and each one's docs are shifted to its group offset, so the
+        // concatenation stays sorted.
+        for (size_t i = 0; i < hidden_positions.size(); ++i) {
+            DorisVector<uint32_t> segment_hidden;
+            RETURN_IF_ERROR(collect_hidden_docs(rowset, rowset->segment(hidden_positions[i]),
+                                                *tablet_schema, *hidden_rows, io_ctx,
+                                                &segment_hidden));
+            for (const uint32_t doc : segment_hidden) {
+                hidden_docs.push_back(doc + hidden_offsets[i]);
+            }
+        }
     }
 
     if (is_snii) {

@@ -81,6 +81,8 @@ void doris_rowset_meta_to_cloud(RowsetMetaCloudPB* out, const RowsetMetaPB& in) 
     out->set_txn_expiration(in.txn_expiration());
     out->set_segments_overlap_pb(in.segments_overlap_pb());
     out->mutable_segment_group_sizes()->CopyFrom(in.segment_group_sizes());
+    out->mutable_inverted_index_group_segment_counts()->CopyFrom(
+            in.inverted_index_group_segment_counts());
     if (in.has_segments_key_bounds_truncated()) {
         out->set_segments_key_bounds_truncated(in.segments_key_bounds_truncated());
     }
@@ -181,6 +183,8 @@ void doris_rowset_meta_to_cloud(RowsetMetaCloudPB* out, RowsetMetaPB&& in) {
     out->set_txn_expiration(in.txn_expiration());
     out->set_segments_overlap_pb(in.segments_overlap_pb());
     out->mutable_segment_group_sizes()->Swap(in.mutable_segment_group_sizes());
+    out->mutable_inverted_index_group_segment_counts()->Swap(
+            in.mutable_inverted_index_group_segment_counts());
     if (in.has_segments_key_bounds_truncated()) {
         out->set_segments_key_bounds_truncated(in.segments_key_bounds_truncated());
     }
@@ -293,6 +297,8 @@ void cloud_rowset_meta_to_doris(RowsetMetaPB* out, const RowsetMetaCloudPB& in) 
     out->set_txn_expiration(in.txn_expiration());
     out->set_segments_overlap_pb(in.segments_overlap_pb());
     out->mutable_segment_group_sizes()->CopyFrom(in.segment_group_sizes());
+    out->mutable_inverted_index_group_segment_counts()->CopyFrom(
+            in.inverted_index_group_segment_counts());
     if (in.has_segments_key_bounds_truncated()) {
         out->set_segments_key_bounds_truncated(in.segments_key_bounds_truncated());
     }
@@ -393,6 +399,8 @@ void cloud_rowset_meta_to_doris(RowsetMetaPB* out, RowsetMetaCloudPB&& in) {
     out->set_txn_expiration(in.txn_expiration());
     out->set_segments_overlap_pb(in.segments_overlap_pb());
     out->mutable_segment_group_sizes()->Swap(in.mutable_segment_group_sizes());
+    out->mutable_inverted_index_group_segment_counts()->Swap(
+            in.mutable_inverted_index_group_segment_counts());
     if (in.has_segments_key_bounds_truncated()) {
         out->set_segments_key_bounds_truncated(in.segments_key_bounds_truncated());
     }
