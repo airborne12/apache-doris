@@ -61,6 +61,7 @@
 #include "storage/index/inverted/query/logical/match_lowering.h"
 #include "storage/index/inverted/query/scoring/bm25_similarity.h"
 #include "storage/index/inverted/query/scoring/collection_similarity.h"
+#include "storage/index/inverted/reader/group_slice_source.h"
 #include "storage/olap_common.h"
 #include "util/defer_op.h"
 
@@ -144,6 +145,12 @@ Status TextIndexReader::open_source(const IndexQueryContextPtr& context, const s
                                     index_query::IndexSourcePtr* source) {
     RETURN_IF_ERROR(_open_index(context, opened));
     *source = _bind_source(context, field, **opened);
+    if (_group_slice.has_value()) {
+        // SEARCH reads the source itself, in segment rowids: an unsliced group source would hand
+        // it every segment's documents, e.g. a match at group docid 70 000 reported as a row of
+        // a 33 000-row segment, with null masks, scores and deletes applied to the wrong rows.
+        *source = std::make_shared<GroupSliceSource>(std::move(*source), *_group_slice);
+    }
     return Status::OK();
 }
 
@@ -432,7 +439,15 @@ Status TextIndexReader::_execute(const IndexQueryContextPtr& context,
                                  const std::string& column_name, const LeafRequest& request,
                                  std::shared_ptr<roaring::Roaring>& bit_map,
                                  InvertedIndexQueryCacheHandle* null_bitmap_cache_handle) {
-    if (_group_slice.has_value()) {
+    // A scoring leaf on a segment group index reads this segment's slice of the source (see
+    // SniiIndexReader::_run_leaf) instead of the shared group run: its BM25 values belong in this
+    // segment's similarity, and handing a group's scores out per segment costs a group-sized hash
+    // map built by one thread and probed by every segment, e.g. 7M scores for 33 segments, against
+    // 33 small maps filled in parallel.
+    const bool scoring =
+            context->collection_similarity != nullptr &&
+            IndexReaderHelper::is_need_similarity_score(request.query_type, &_index_meta);
+    if (_group_slice.has_value() && !scoring) {
         return _execute_in_group(context, column_name, request, bit_map, null_bitmap_cache_handle);
     }
     std::unique_ptr<OpenedIndex> index;
@@ -456,12 +471,10 @@ Status TextIndexReader::_execute(const IndexQueryContextPtr& context,
 // The index answers in group docids, so everything the context carries in segment rowids is
 // translated around one group-space run:
 //   - candidate_rows are not pushed down (see below);
-//   - BM25 scores are collected into a private similarity and handed back for this segment's
-//     rows only, shifted by -offset;
 //   - a count-only single term is answered from its documents in the slice (see below);
 //   - the result is sliced to [offset, offset + rows) and shifted back.
-// A non-scoring group result is shared by every segment and scanner of the query through
-// QueryGroupResults, computed once even when they ask concurrently.
+// Scoring leaves never come here (see _execute). A group result is shared by every segment and
+// scanner of the query through QueryGroupResults, computed once even when they ask concurrently.
 // Example: 31 segments of one group in 4 scanners run a regexp expansion once, not 31 times.
 Status TextIndexReader::_execute_in_group(const IndexQueryContextPtr& context,
                                           const std::string& column_name,
@@ -508,17 +521,9 @@ Status TextIndexReader::_execute_in_group(const IndexQueryContextPtr& context,
             }
         }
     }
-    const bool scoring =
-            context->collection_similarity != nullptr &&
-            IndexReaderHelper::is_need_similarity_score(request.query_type, &_index_meta);
     const auto run_group = [&](std::shared_ptr<roaring::Roaring>* out) -> Status {
         const bool saved_count_fastpath = context->count_on_index_fastpath;
-        CollectionSimilarityPtr saved_similarity = context->collection_similarity;
         context->count_on_index_fastpath = false;
-        if (scoring) {
-            context->collection_similarity = std::make_shared<CollectionSimilarity>();
-        }
-        CollectionSimilarityPtr group_similarity = context->collection_similarity;
         std::unique_ptr<OpenedIndex> index;
         bool count_shaped = false;
         Status status;
@@ -527,16 +532,8 @@ Status TextIndexReader::_execute_in_group(const IndexQueryContextPtr& context,
             status = _run_request(context, column_name, request, *out, &index, &count_shaped);
         }
         context->count_on_index_fastpath = saved_count_fastpath;
-        context->collection_similarity = saved_similarity;
         RETURN_IF_ERROR(status);
         DORIS_CHECK(!count_shaped);
-        if (scoring) {
-            for (const auto& [docid, score] : group_similarity->release_scores()) {
-                if (slice.contains(docid)) {
-                    saved_similarity->collect(docid - slice.offset, score);
-                }
-            }
-        }
         return Status::OK();
     };
 
@@ -548,45 +545,40 @@ Status TextIndexReader::_execute_in_group(const IndexQueryContextPtr& context,
     context->candidate_rows = nullptr;
     Defer restore_candidates([&] { context->candidate_rows = saved_candidates; });
     std::shared_ptr<roaring::Roaring> group_result;
-    if (scoring) {
-        RETURN_IF_ERROR(run_group(&group_result));
-    } else {
-        const std::string file_key = _index_file_reader->get_index_file_cache_key(&_index_meta);
-        const int32_t max_expansions = index_query::max_expansions(*context);
-        const std::string semantic =
-                request.leaf != nullptr
-                        ? InvertedIndexQueryCache::CacheKey(
-                                  file_key, column_name, request.query_type,
-                                  InvertedIndexLeafSemantic {.leaf = request.leaf,
-                                                             .max_expansions = max_expansions}
-                                          .encode())
-                                  .encode()
-                        : InvertedIndexQueryCache::CacheKey(
-                                  file_key, column_name, request.query_type,
-                                  InvertedIndexRawQuerySemantic {.raw_query_bytes = request.text,
-                                                                 .query_type = request.query_type,
-                                                                 .max_expansions = max_expansions})
-                                  .encode();
-        auto* results = QueryGroupResults::instance();
-        const std::string group_key =
-                QueryGroupResults::make_key(context->runtime_state->query_id(), semantic);
-        group_result = results->lookup(group_key);
-        if (group_result == nullptr) {
-            Status flight_status = run_query_single_flight(
-                    query_single_flight(), group_key, &group_result,
+    const std::string file_key = _index_file_reader->get_index_file_cache_key(&_index_meta);
+    const int32_t max_expansions = index_query::max_expansions(*context);
+    const std::string semantic =
+            request.leaf != nullptr
+                    ? InvertedIndexQueryCache::CacheKey(
+                              file_key, column_name, request.query_type,
+                              InvertedIndexLeafSemantic {.leaf = request.leaf,
+                                                         .max_expansions = max_expansions}
+                                      .encode())
+                              .encode()
+                    : InvertedIndexQueryCache::CacheKey(
+                              file_key, column_name, request.query_type,
+                              InvertedIndexRawQuerySemantic {.raw_query_bytes = request.text,
+                                                             .query_type = request.query_type,
+                                                             .max_expansions = max_expansions})
+                              .encode();
+    auto* results = QueryGroupResults::instance();
+    const std::string group_key =
+            QueryGroupResults::make_key(context->runtime_state->query_id(), semantic);
+    group_result = results->lookup(group_key);
+    if (group_result == nullptr) {
+        Status flight_status = run_query_single_flight(
+                query_single_flight(), group_key, &group_result,
 #ifdef BE_TEST
-                    _single_flight_follower_joined_observer, _single_flight_follower_joined_opaque,
-                    _single_flight_leader_before_compute_observer,
-                    _single_flight_leader_before_compute_opaque,
+                _single_flight_follower_joined_observer, _single_flight_follower_joined_opaque,
+                _single_flight_leader_before_compute_observer,
+                _single_flight_leader_before_compute_opaque,
 #endif
-                    [&](std::shared_ptr<roaring::Roaring>* shared) {
-                        RETURN_IF_ERROR(run_group(shared));
-                        results->insert(group_key, context->runtime_state->get_query_ctx(),
-                                        *shared);
-                        return Status::OK();
-                    });
-            RETURN_IF_ERROR(flight_status);
-        }
+                [&](std::shared_ptr<roaring::Roaring>* shared) {
+                    RETURN_IF_ERROR(run_group(shared));
+                    results->insert(group_key, context->runtime_state->get_query_ctx(), *shared);
+                    return Status::OK();
+                });
+        RETURN_IF_ERROR(flight_status);
     }
     bit_map = std::make_shared<roaring::Roaring>(slice.to_segment(*group_result));
     if (null_bitmap_cache_handle != nullptr) {

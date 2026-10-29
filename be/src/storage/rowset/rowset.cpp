@@ -194,7 +194,7 @@ std::vector<std::string> Rowset::get_index_file_names() {
     if (rowset_meta()->has_inverted_index_groups()) {
         for (int group_id = 0;
              group_id < rowset_meta()->inverted_index_group_segment_counts().size(); ++group_id) {
-            file_names.push_back(InvertedIndexDescriptor::get_index_file_name_group(
+            file_names.push_back(segment_v2::InvertedIndexDescriptor::get_index_file_name_group(
                     rowset_id().to_string(), group_id));
         }
         return file_names;

@@ -94,8 +94,8 @@ protected:
     Status _execute(const IndexQueryContextPtr& context, const std::string& column_name,
                     const LeafRequest& request, std::shared_ptr<roaring::Roaring>& bit_map,
                     InvertedIndexQueryCacheHandle* null_bitmap_cache_handle);
-    // _execute over a segment group index: runs in group space, slices the result to this
-    // segment (see _group_slice).
+    // _execute over a segment group index: runs in group space once per query, slices the
+    // result to this segment (see _group_slice).
     Status _execute_in_group(const IndexQueryContextPtr& context, const std::string& column_name,
                              const LeafRequest& request, std::shared_ptr<roaring::Roaring>& bit_map,
                              InvertedIndexQueryCacheHandle* null_bitmap_cache_handle);

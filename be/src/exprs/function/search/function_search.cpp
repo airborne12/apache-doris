@@ -104,7 +104,12 @@ static std::string extract_segment_prefix(
             if (!inv_reader) continue;
             auto file_reader = inv_reader->get_index_file_reader();
             if (!file_reader) continue;
-            return file_reader->get_index_path_prefix();
+            // Every segment of a segment group index shares the group file's prefix, so the slice
+            // names the segment: without it segment 2 of group g0 would be served the rows cached
+            // for segment 1.
+            const auto& slice = file_reader->group_slice();
+            return slice.has_value() ? file_reader->get_index_path_prefix() + slice->cache_suffix()
+                                     : file_reader->get_index_path_prefix();
         }
     }
     VLOG_DEBUG << "extract_segment_prefix: no suitable inverted index reader found across "

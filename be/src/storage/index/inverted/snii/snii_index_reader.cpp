@@ -48,6 +48,7 @@
 #include "storage/index/inverted/query/exec/term_pattern.h"
 #include "storage/index/inverted/query/logical/gram/gram_query.h"
 #include "storage/index/inverted/query/logical/gram/regex_gram_compiler.h"
+#include "storage/index/inverted/reader/group_slice_source.h"
 #include "storage/index/inverted/snii/format/null_bitmap.h"
 #include "storage/index/inverted/snii/query/count_query.h"
 #include "storage/index/inverted/snii/query/gram_boolean_query.h"
@@ -319,6 +320,12 @@ Status SniiIndexReader::_run_leaf(const IndexQueryContextPtr& context,
                                   std::shared_ptr<roaring::Roaring>* out) {
     const std::wstring field = StringUtil::string_to_wstring(column_name);
     auto source = _bind_source(context, field, index);
+    if (_group_slice.has_value() && scoring) {
+        // A scoring leaf on a segment group index runs per segment, outside the group run (see
+        // TextIndexReader::_execute), so it reads its slice: its rows, candidates and BM25 values
+        // are in this segment's rowids.
+        source = std::make_shared<GroupSliceSource>(std::move(source), *_group_slice);
+    }
     const uint32_t doc_count = source->doc_count();
     auto result = std::make_shared<roaring::Roaring>();
     RETURN_IF_ERROR_OR_CATCH_EXCEPTION(run_leaf(context, field, leaf, candidates, scoring,
