@@ -37,6 +37,7 @@ public:
 
     void analyze(AnalyzeContext& context) override;
     void reset() override;
+    bool idle() const { return number_start_ == -1 && number_end_ == -1 && count_hits_.empty(); }
 
 private:
     void processCNumber(AnalyzeContext& context);

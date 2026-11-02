@@ -20,6 +20,20 @@
 namespace doris::segment_v2 {
 
 CharacterUtil::CharType CharacterUtil::identifyCharType(int32_t rune) {
+    if (spike && rune >= 0 && rune < 0x10000) {
+        static const std::vector<CharType> table = [] {
+            std::vector<CharType> types(0x10000);
+            for (int32_t cp = 0; cp < 0x10000; ++cp) {
+                types[cp] = identifyCharTypeUncached(cp);
+            }
+            return types;
+        }();
+        return table[rune];
+    }
+    return identifyCharTypeUncached(rune);
+}
+
+CharacterUtil::CharType CharacterUtil::identifyCharTypeUncached(int32_t rune) {
     if (rune >= '0' && rune <= '9') {
         return CharType::ARABIC;
     }
@@ -102,6 +116,21 @@ void CharacterUtil::decodeStringToRunes(char* str, size_t length, TypedRuneArray
 }
 
 void CharacterUtil::regularizeString(std::string& input, bool use_lowercase) {
+    if (spike) {
+        // U+3000 starts with E3 and U+FF01..U+FF5E with EF, and a token with neither of those
+        // leads and no ASCII capital comes back byte for byte.
+        bool unchanged = true;
+        for (const char c : input) {
+            const auto byte = static_cast<uint8_t>(c);
+            if (byte == 0xE3 || byte == 0xEF || (use_lowercase && byte >= 'A' && byte <= 'Z')) {
+                unchanged = false;
+                break;
+            }
+        }
+        if (unchanged) {
+            return;
+        }
+    }
     std::string temp;
     size_t len = input.size();
     temp.reserve(len);

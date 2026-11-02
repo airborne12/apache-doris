@@ -45,8 +45,28 @@ bool IKSegmenter::next(Lexeme& lexeme) {
         } else {
             context_->initCursor();
             do {
-                for (const auto& segmenter : segmenters_) {
-                    segmenter->analyze(*context_);
+                if (CharacterUtil::spike) {
+                    // The order is loadSegmenters(): letter, quantifier, CJK, surrogate. An idle
+                    // quantifier segmenter does nothing on a non-Chinese character but release
+                    // its lock, and the surrogate one acts only on a surrogate.
+                    const CharacterUtil::CharType type = context_->getCurrentCharType();
+                    segmenters_[0]->analyze(*context_);
+                    auto* quantifier = static_cast<CN_QuantifierSegmenter*>(segmenters_[1].get());
+                    if (type == CharacterUtil::CharType::CHINESE || !quantifier->idle()) {
+                        quantifier->analyze(*context_);
+                    } else {
+                        context_->unlockBuffer(CN_QuantifierSegmenter::SEGMENTER_TYPE);
+                    }
+                    segmenters_[2]->analyze(*context_);
+                    if (type == CharacterUtil::CharType::SURROGATE) {
+                        segmenters_[3]->analyze(*context_);
+                    } else {
+                        context_->unlockBuffer(AnalyzeContext::SegmenterType::SURROGATE_PAIR_SEGMENTER);
+                    }
+                } else {
+                    for (const auto& segmenter : segmenters_) {
+                        segmenter->analyze(*context_);
+                    }
                 }
                 // The buffer is nearly read, new characters need to be read in.
                 if (context_->needRefillBuffer()) {

@@ -176,6 +176,10 @@ inline const bool registered = [] {
             {"ik_max_word", with_dict([] {
                  return builtin(InvertedIndexParserType::PARSER_IK, INVERTED_INDEX_PARSER_MAX_WORD);
              })},
+            {"kuromoji", with_dict([] {
+                 config::enable_kuromoji_analyzer = true;
+                 return builtin(InvertedIndexParserType::PARSER_KUROMOJI);
+             })},
             {"custom_standard_lower", [] { return custom("standard", {"lowercase"}); }},
             {"custom_basic_lower", [] { return custom("basic", {"lowercase"}); }},
             {"custom_keyword_lower", [] { return custom("keyword", {"lowercase"}); }},

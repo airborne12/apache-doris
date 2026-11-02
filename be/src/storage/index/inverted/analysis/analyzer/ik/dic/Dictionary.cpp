@@ -125,8 +125,43 @@ void Dictionary::reload() {
     }
 }
 
+void Dictionary::flatStep(const FlatDict& dict, uint32_t node,
+                          const CharacterUtil::TypedRuneArray& typed_runes, size_t offset,
+                          Hit& hit) {
+    hit.setUnmatch();
+    const auto& rune = typed_runes[offset];
+    hit.setByteEnd(rune.offset + rune.getByteLength());
+    hit.setCharEnd(offset);
+    const uint32_t child = dict.child(node, rune.getChar());
+    if (child != FlatDict::kNone) {
+        if (dict.is_word(child)) {
+            hit.setMatch();
+        }
+        if (dict.has_children(child)) {
+            hit.setPrefix();
+            hit.setFlatNode(&dict, child);
+        }
+    }
+}
+
+Hit Dictionary::flatMatch(const FlatDict& dict, const CharacterUtil::TypedRuneArray& typed_runes,
+                          size_t offset) {
+    Hit hit;
+    hit.setByteBegin(typed_runes[offset].offset);
+    hit.setCharBegin(offset);
+    flatStep(dict, 0, typed_runes, offset, hit);
+    if (!hit.isUnmatch()) {
+        hit.setByteEnd(typed_runes[offset].getNextBytePosition());
+        hit.setCharEnd(offset + 1);
+    }
+    return hit;
+}
+
 Hit Dictionary::matchInMainDict(const CharacterUtil::TypedRuneArray& typed_runes,
                                 size_t unicode_offset, size_t length) {
+    if (CharacterUtil::spike && length == 1) {
+        return flatMatch(flat_main_, typed_runes, unicode_offset);
+    }
     Hit result = main_dict_->match(typed_runes, unicode_offset, length);
 
     if (!result.isUnmatch()) {
@@ -140,6 +175,9 @@ Hit Dictionary::matchInMainDict(const CharacterUtil::TypedRuneArray& typed_runes
 
 Hit Dictionary::matchInQuantifierDict(const CharacterUtil::TypedRuneArray& typed_runes,
                                       size_t unicode_offset, size_t length) {
+    if (CharacterUtil::spike && length == 1) {
+        return flatMatch(flat_quantifier_, typed_runes, unicode_offset);
+    }
     Hit result = quantifier_dict_->match(typed_runes, unicode_offset, length);
 
     if (!result.isUnmatch()) {
@@ -153,6 +191,10 @@ Hit Dictionary::matchInQuantifierDict(const CharacterUtil::TypedRuneArray& typed
 
 void Dictionary::matchWithHit(const CharacterUtil::TypedRuneArray& typed_runes,
                               size_t current_index, Hit& hit) {
+    if (CharacterUtil::spike) {
+        flatStep(*hit.getFlatDict(), hit.getFlatNode(), typed_runes, current_index, hit);
+        return;
+    }
     if (auto* matchedSegment = hit.getMatchedDictSegment()) {
         matchedSegment->match(typed_runes, current_index, 1, hit);
         return;
@@ -164,6 +206,20 @@ bool Dictionary::isStopWord(const CharacterUtil::TypedRuneArray& typed_runes, si
                             size_t length) {
     if (typed_runes.empty() || unicode_offset >= typed_runes.size()) {
         return false;
+    }
+
+    if (CharacterUtil::spike) {
+        const size_t count = (length == 0 || unicode_offset + length > typed_runes.size())
+                                     ? typed_runes.size() - unicode_offset
+                                     : length;
+        uint32_t node = 0;
+        for (size_t i = 0; i < count; ++i) {
+            node = flat_stop_.child(node, typed_runes[unicode_offset + i].getChar());
+            if (node == FlatDict::kNone) {
+                return false;
+            }
+        }
+        return flat_stop_.is_word(node);
     }
 
     Hit result = stop_words_->match(typed_runes, unicode_offset, length);

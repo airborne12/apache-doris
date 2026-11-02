@@ -26,6 +26,9 @@
 #include <vector>
 
 #include "benchmark_analyzer.hpp"
+#include "storage/index/inverted/analysis/analyzer/ik/core/CharacterUtil.h"
+#include "storage/index/inverted/analysis/analyzer/ik/dic/Dictionary.h"
+#include "storage/index/inverted/analysis/analyzer/kuromoji/kuromoji_viterbi.h"
 #include "storage/index/inverted/analysis/token_filter/lower_case_filter.h"
 #include "storage/index/inverted/analysis/tokenizer/standard/standard_tokenizer_impl.h"
 
@@ -641,6 +644,59 @@ inline void custom_standard_lower_runs(std::string_view text, Scratch& s) {
     });
 }
 
+} // namespace doris::segment_v2::inverted_index::analyzer_spike
+
+#include "benchmark_analyzer_spike_icu.hpp"
+#include "benchmark_analyzer_spike_jieba.hpp"
+
+namespace doris::segment_v2::inverted_index::analyzer_spike {
+
+// The ik spike lives in the ik sources behind CharacterUtil::spike, so this drives the real tokenizer
+// with the flag up on one reused stream, and the verifier compares it with the flag down.
+inline void ik_kernel(std::string_view text, Scratch& s, AnalyzerPtr& analyzer, ReaderPtr& reader) {
+    CharacterUtil::spike = true;
+    s.tokens.clear();
+    s.owned.clear();
+    reader->init(text.data(), static_cast<int32_t>(text.size()), false);
+    auto* stream = analyzer->reusableTokenStream(L"", reader);
+    lucene::analysis::Token token;
+    while (stream->next(&token)) {
+        s.owned.emplace_back(token.termBuffer<char>(), token.termLength<char>());
+        s.tokens.push_back({s.owned.back().data(), static_cast<uint32_t>(s.owned.back().size()),
+                            token.getPositionIncrement()});
+    }
+    CharacterUtil::spike = false;
+}
+
+template <bool kSmart>
+inline void ik_spike(std::string_view text, Scratch& s) {
+    static thread_local AnalyzerPtr analyzer;
+    static thread_local ReaderPtr reader;
+    if (analyzer == nullptr) {
+        config::inverted_index_dict_path = std::getenv("ANALYZER_BENCH_DICT_DIR");
+        analyzer = analyzer_benchmark::builtin(InvertedIndexParserType::PARSER_IK,
+                                               kSmart ? INVERTED_INDEX_PARSER_SMART
+                                                      : INVERTED_INDEX_PARSER_MAX_WORD);
+        reader = InvertedIndexAnalyzer::create_reader({});
+        Dictionary::getSingleton()->buildFlat();
+    }
+    ik_kernel(text, s, analyzer, reader);
+}
+
+inline void kuromoji_spike(std::string_view text, Scratch& s) {
+    static thread_local AnalyzerPtr analyzer;
+    static thread_local ReaderPtr reader;
+    if (analyzer == nullptr) {
+        config::inverted_index_dict_path = std::getenv("ANALYZER_BENCH_DICT_DIR");
+        config::enable_kuromoji_analyzer = true;
+        analyzer = analyzer_benchmark::builtin(InvertedIndexParserType::PARSER_KUROMOJI);
+        reader = InvertedIndexAnalyzer::create_reader({});
+    }
+    kuromoji::KuromojiViterbi::spike = true;
+    ik_kernel(text, s, analyzer, reader);
+    kuromoji::KuromojiViterbi::spike = false;
+}
+
 using Kernel = void (*)(std::string_view, Scratch&);
 
 inline void run_kernel(benchmark::State& state, Kernel kernel,
@@ -736,7 +792,39 @@ inline const bool registered = [] {
             {"custom_standard_lower", custom_standard_lower,
              [] { return analyzer_benchmark::custom("standard", {"lowercase"}); }},
             {"custom_standard_lower_runs", custom_standard_lower_runs,
-             [] { return analyzer_benchmark::custom("standard", {"lowercase"}); }}};
+             [] { return analyzer_benchmark::custom("standard", {"lowercase"}); }},
+            {"ik_smart", ik_spike<true>,
+             [] {
+                 config::inverted_index_dict_path = std::getenv("ANALYZER_BENCH_DICT_DIR");
+                 return builtin(InvertedIndexParserType::PARSER_IK, INVERTED_INDEX_PARSER_SMART);
+             }},
+            {"ik_max_word", ik_spike<false>,
+             [] {
+                 config::inverted_index_dict_path = std::getenv("ANALYZER_BENCH_DICT_DIR");
+                 return builtin(InvertedIndexParserType::PARSER_IK, INVERTED_INDEX_PARSER_MAX_WORD);
+             }},
+            {"kuromoji", kuromoji_spike,
+             [] {
+                 config::inverted_index_dict_path = std::getenv("ANALYZER_BENCH_DICT_DIR");
+                 config::enable_kuromoji_analyzer = true;
+                 return builtin(InvertedIndexParserType::PARSER_KUROMOJI);
+             }},
+            {"icu", icu_kernel,
+             [] {
+                 config::inverted_index_dict_path = std::getenv("ANALYZER_BENCH_DICT_DIR");
+                 return builtin(InvertedIndexParserType::PARSER_ICU);
+             }},
+            {"chinese_coarse", chinese_coarse,
+             [] {
+                 config::inverted_index_dict_path = std::getenv("ANALYZER_BENCH_DICT_DIR");
+                 return builtin(InvertedIndexParserType::PARSER_CHINESE,
+                                INVERTED_INDEX_PARSER_COARSE_GRANULARITY);
+             }},
+            {"chinese_fine", chinese_fine, [] {
+                 config::inverted_index_dict_path = std::getenv("ANALYZER_BENCH_DICT_DIR");
+                 return builtin(InvertedIndexParserType::PARSER_CHINESE,
+                                INVERTED_INDEX_PARSER_FINE_GRANULARITY);
+             }}};
     for (const auto& entry : std::filesystem::directory_iterator(directory)) {
         if (entry.path().extension() != ".rows") {
             continue;

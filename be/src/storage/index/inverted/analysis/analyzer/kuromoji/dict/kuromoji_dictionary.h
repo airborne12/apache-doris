@@ -83,6 +83,10 @@ public:
                 _cells, _forward_size, forward_id, backward_id);
     }
 
+    uint32_t forward_size() const { return _forward_size; }
+    const int16_t* cells() const { return _cells; }
+    uint32_t backward_size() const { return _backward_size; }
+
     // Character definitions.
     CharCategory char_category(char32_t cp) const {
         return cp < 0x10000 ? static_cast<CharCategory>(_catmap[cp]) : CharCategory::CAT_DEFAULT;

@@ -32,6 +32,7 @@
 #include "storage/index/inverted/analysis/analyzer/ik/cfg/Configuration.h"
 #include "storage/index/inverted/analysis/analyzer/ik/core/CharacterUtil.h"
 #include "storage/index/inverted/analysis/analyzer/ik/dic/DictSegment.h"
+#include "storage/index/inverted/analysis/analyzer/ik/dic/FlatDict.h"
 #include "storage/index/inverted/analysis/analyzer/ik/dic/Hit.h"
 
 namespace doris::segment_v2 {
@@ -45,6 +46,10 @@ private:
     std::unique_ptr<DictSegment> main_dict_;
     std::unique_ptr<DictSegment> quantifier_dict_;
     std::unique_ptr<DictSegment> stop_words_;
+    FlatDict flat_main_;
+    FlatDict flat_quantifier_;
+    FlatDict flat_stop_;
+    bool flat_ready_ = false;
     std::unique_ptr<Configuration> config_;
     bool load_ext_dict_;
     class Cleanup {
@@ -73,10 +78,24 @@ private:
     void loadDictFile(DictSegment* dict, const std::string& file_path, bool critical,
                       const std::string& dict_name);
 
+    static void flatStep(const FlatDict& dict, uint32_t node,
+                         const CharacterUtil::TypedRuneArray& typed_runes, size_t offset, Hit& hit);
+    static Hit flatMatch(const FlatDict& dict, const CharacterUtil::TypedRuneArray& typed_runes,
+                         size_t offset);
+
     Dictionary(const Dictionary&) = delete;
     Dictionary& operator=(const Dictionary&) = delete;
 
 public:
+    void buildFlat() {
+        if (!flat_ready_) {
+            flat_main_.build(*main_dict_);
+            flat_quantifier_.build(*quantifier_dict_);
+            flat_stop_.build(*stop_words_);
+            flat_ready_ = true;
+        }
+    }
+
     static void destroy() {
         if (singleton_) {
             delete singleton_;

@@ -74,7 +74,11 @@ public:
 
     using TypedRuneArray = std::vector<TypedRune>;
 
+    // Spike only, never merged: selects the cheaper paths at run time so one binary can compare
+    // them with the current behaviour token for token.
+    static inline bool spike = false;
     static CharType identifyCharType(int32_t rune);
+    static CharType identifyCharTypeUncached(int32_t rune);
 
     static void decodeStringToRunes(char* str, size_t length, TypedRuneArray& typed_runes,
                                     bool use_lowercase);

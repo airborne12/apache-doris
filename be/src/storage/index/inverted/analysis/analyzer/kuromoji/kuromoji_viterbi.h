@@ -50,6 +50,8 @@ struct KuromojiMorpheme {
 // per-code-point unigrams. Normal mode applies no penalty.
 class KuromojiViterbi {
 public:
+    static inline bool spike = false; // analyzer rewrite spike, not for merging
+
     explicit KuromojiViterbi(const KuromojiDictionary& dict,
                              KuromojiMode mode = KuromojiMode::Normal)
             : _dict(dict), _mode(mode) {}

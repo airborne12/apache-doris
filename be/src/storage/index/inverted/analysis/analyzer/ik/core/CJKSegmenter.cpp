@@ -25,9 +25,9 @@ void CJKSegmenter::analyze(AnalyzeContext& context) {
     if (context.getCurrentCharType() != CharacterUtil::CharType::USELESS) {
         // Prioritize processing the prefixes that have already been matched
         if (!tmp_hits_.empty()) {
-            auto it = tmp_hits_.begin();
-            while (it != tmp_hits_.end()) {
-                Hit& hit = *it;
+            size_t kept = 0;
+            for (size_t i = 0; i < tmp_hits_.size(); ++i) {
+                Hit& hit = tmp_hits_[i];
                 Dictionary::getSingleton()->matchWithHit(context.getTypedRuneArray(),
                                                          context.getCursor(), hit);
                 if (hit.isMatch()) {
@@ -36,18 +36,20 @@ void CJKSegmenter::analyze(AnalyzeContext& context) {
                                      hit.getCharBegin(), hit.getCharEnd());
                     context.addLexeme(newLexeme);
 
-                    if (!hit.isPrefix()) {
-                        it = tmp_hits_.erase(it);
-                    } else {
-                        ++it;
+                    if (hit.isPrefix()) {
+                        if (kept != i) {
+                            tmp_hits_[kept] = hit;
+                        }
+                        ++kept;
                     }
-                } else if (hit.isUnmatch()) {
-                    // Hit is not a word, remove
-                    it = tmp_hits_.erase(it);
-                } else {
-                    ++it;
+                } else if (!hit.isUnmatch()) {
+                    if (kept != i) {
+                        tmp_hits_[kept] = hit;
+                    }
+                    ++kept;
                 }
             }
+            tmp_hits_.resize(kept);
         }
         // Perform a single-character match at the current pointer position.
         auto singleCharHit = Dictionary::getSingleton()->matchInMainDict(

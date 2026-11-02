@@ -31,7 +31,7 @@ class CJKSegmenter : public ISegmenter {
 private:
     static constexpr AnalyzeContext::SegmenterType SEGMENTER_TYPE =
             AnalyzeContext::SegmenterType::CJK_SEGMENTER;
-    std::list<Hit> tmp_hits_;
+    std::vector<Hit> tmp_hits_;
 
 public:
     CJKSegmenter();

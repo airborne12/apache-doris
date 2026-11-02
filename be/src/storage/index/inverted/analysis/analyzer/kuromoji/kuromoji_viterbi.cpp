@@ -17,6 +17,9 @@
 
 #include "storage/index/inverted/analysis/analyzer/kuromoji/kuromoji_viterbi.h"
 
+#include <cstdio>
+#include <cstdlib>
+
 #include <algorithm>
 #include <cstddef>
 #include <limits>
@@ -108,6 +111,28 @@ int64_t compute_penalty(const KuromojiDictionary& dict, std::string_view text, u
     return 0;
 }
 
+// Analyzer rewrite spike, not for merging. All candidates that start at one position relax against
+// the same set of nodes ending there, so the work is reduced on both sides: only the cheapest node
+// of each right id can win, and only one relaxation per left id is needed. The relaxation picks the
+// minimum cost and, among equal costs, the smallest node index, as the newest-first walk with <= does.
+struct RelaxScratch {
+    struct Candidate {
+        uint32_t right_id;
+        int32_t node;
+        int64_t cost;
+    };
+    struct Memo {
+        uint32_t stamp = 0;
+        int32_t best_prev = -1;
+        int64_t best = 0;
+    };
+    std::vector<Candidate> candidates;
+    std::vector<uint32_t> right_stamp;
+    std::vector<uint32_t> right_slot;
+    std::vector<Memo> memo;
+    uint32_t stamp = 0;
+};
+
 // A lattice node spanning [start, end) bytes of the input.
 struct VNode {
     uint32_t start;
@@ -121,6 +146,30 @@ struct VNode {
     int back; // previous node index, -1 if none
 };
 
+struct LatticeStats {
+    uint64_t positions = 0;
+    uint64_t ended = 0;
+    uint64_t ended_unique = 0;
+    uint64_t started = 0;
+    uint64_t started_unique = 0;
+    ~LatticeStats() {
+        if (positions != 0) {
+            fprintf(stderr, "lattice positions=%lu ended/pos=%.2f unique=%.2f started/pos=%.2f unique=%.2f\n",
+                    positions, double(ended) / positions, double(ended_unique) / positions,
+                    double(started) / positions, double(started_unique) / positions);
+        }
+    }
+};
+LatticeStats g_lattice_stats;
+const bool g_count_lattice = std::getenv("KMJ_STATS") != nullptr;
+
+struct ReusedLattice {
+    std::vector<VNode> nodes;
+    std::vector<int32_t> end_head;
+    std::vector<int32_t> end_next;
+    RelaxScratch relax;
+};
+
 } // namespace
 
 void KuromojiViterbi::segment(std::string_view text, std::vector<KuromojiMorpheme>* out) const {
@@ -130,9 +179,17 @@ void KuromojiViterbi::segment(std::string_view text, std::vector<KuromojiMorphem
         return;
     }
 
-    std::vector<VNode> nodes;
-    std::vector<int32_t> end_head(n + 1, -1);
-    std::vector<int32_t> end_next;
+    static thread_local ReusedLattice reused;
+    ReusedLattice& lattice = reused;
+    std::vector<VNode> local_nodes;
+    std::vector<int32_t> local_end_head;
+    std::vector<int32_t> local_end_next;
+    std::vector<VNode>& nodes = spike ? lattice.nodes : local_nodes;
+    std::vector<int32_t>& end_head = spike ? lattice.end_head : local_end_head;
+    std::vector<int32_t>& end_next = spike ? lattice.end_next : local_end_next;
+    nodes.clear();
+    end_next.clear();
+    end_head.assign(n + 1, -1);
 
     // BOS (index 0): ends at position 0, context id 0, zero cost.
     nodes.push_back(VNode {0, 0, 0, 0, 0, false, 0, 0, -1});
@@ -143,11 +200,82 @@ void KuromojiViterbi::segment(std::string_view text, std::vector<KuromojiMorphem
         return _mode == KuromojiMode::Normal ? 0 : compute_penalty(_dict, text, s, e);
     };
 
+    RelaxScratch& relax = lattice.relax;
+    const int16_t* const cells = _dict.cells();
+    const uint32_t forward_size = _dict.forward_size();
+    if (spike && relax.memo.empty()) {
+        relax.right_stamp.assign(_dict.forward_size(), 0);
+        relax.right_slot.assign(_dict.forward_size(), 0);
+        relax.memo.assign(_dict.backward_size(), {});
+    }
+    auto prepare_position = [&](uint32_t s) {
+        ++relax.stamp;
+        relax.candidates.clear();
+        for (int pe = end_head[s]; pe >= 0; pe = end_next[pe]) {
+            const VNode& pv = nodes[static_cast<std::size_t>(pe)];
+            if (pv.total_cost >= KMJ_INF) {
+                continue;
+            }
+            const auto right = static_cast<uint32_t>(pv.right_id);
+            if (relax.right_stamp[right] != relax.stamp) {
+                relax.right_stamp[right] = relax.stamp;
+                relax.right_slot[right] = static_cast<uint32_t>(relax.candidates.size());
+                relax.candidates.push_back({right, pe, pv.total_cost});
+            } else {
+                // same right id
+                RelaxScratch::Candidate& kept = relax.candidates[relax.right_slot[right]];
+                if (pv.total_cost <= kept.cost) { // visited later means older, older wins a tie
+                    kept.cost = pv.total_cost;
+                    kept.node = pe;
+                }
+            }
+            if (g_count_lattice) {
+                ++g_lattice_stats.ended;
+            }
+        }
+        if (g_count_lattice) {
+            ++g_lattice_stats.positions;
+            g_lattice_stats.ended_unique += relax.candidates.size();
+        }
+    };
+
     // Add a node and relax it against all nodes ending at its start position.
     auto add_node = [&](uint32_t s, uint32_t e, int16_t lid, int16_t rid, int16_t wcost, bool known,
-                        uint32_t wid, int64_t penalty) {
+                        uint32_t wid, int64_t penalty) __attribute__((always_inline)) {
         int64_t best = KMJ_INF;
         int best_prev = -1;
+        if (spike) {
+            RelaxScratch::Memo& memo = relax.memo[static_cast<uint32_t>(lid)];
+            if (g_count_lattice) {
+                ++g_lattice_stats.started;
+                g_lattice_stats.started_unique += memo.stamp != relax.stamp;
+            }
+            if (memo.stamp != relax.stamp) {
+                const int16_t* const row = cells + static_cast<uint64_t>(lid) * forward_size;
+                for (const RelaxScratch::Candidate& candidate : relax.candidates) {
+                    const int64_t c = candidate.cost + row[candidate.right_id];
+                    if (c < best || (c == best && candidate.node < best_prev)) {
+                        best = c;
+                        best_prev = candidate.node;
+                    }
+                }
+                memo.stamp = relax.stamp;
+                memo.best = best;
+                memo.best_prev = best_prev;
+            } else {
+                best = memo.best;
+                best_prev = memo.best_prev;
+            }
+            if (best_prev < 0) {
+                return;
+            }
+            const auto idx = static_cast<int>(nodes.size());
+            nodes.push_back(
+                    VNode {s, e, lid, rid, wcost, known, wid, best + wcost + penalty, best_prev});
+            end_next.push_back(end_head[e]);
+            end_head[e] = idx;
+            return;
+        }
         for (int pe = end_head[s]; pe >= 0; pe = end_next[pe]) {
             const VNode& pv = nodes[static_cast<std::size_t>(pe)];
             if (pv.total_cost >= KMJ_INF) {
@@ -185,6 +313,9 @@ void KuromojiViterbi::segment(std::string_view text, std::vector<KuromojiMorphem
         }
         const DecodedCp d0 = decode_utf8(text, pos);
         const auto before = nodes.size();
+        if (spike) {
+            prepare_position(pos);
+        }
 
         // System-dictionary words (common-prefix search).
         _dict.common_prefix_search(text.data() + pos, n - pos, &matches);

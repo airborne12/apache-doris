@@ -24,6 +24,7 @@
 namespace doris::segment_v2 {
 
 class DictSegment;
+class FlatDict;
 
 class Hit {
 private:
@@ -33,6 +34,8 @@ private:
 
     int hitState_ {UNMATCH};
     DictSegment* matchedDictSegment_;
+    const FlatDict* flat_dict_ {nullptr};
+    uint32_t flat_node_ {0};
     size_t byteBegin_ {0};
     size_t byteEnd_ {0};
     size_t charBegin_ {0};
@@ -52,6 +55,13 @@ public:
 
     DictSegment* getMatchedDictSegment() const { return matchedDictSegment_; }
     void setMatchedDictSegment(DictSegment* segment) { matchedDictSegment_ = segment; }
+
+    const FlatDict* getFlatDict() const { return flat_dict_; }
+    uint32_t getFlatNode() const { return flat_node_; }
+    void setFlatNode(const FlatDict* dict, uint32_t node) {
+        flat_dict_ = dict;
+        flat_node_ = node;
+    }
 
     size_t getByteBegin() const { return byteBegin_; }
     void setByteBegin(size_t pos) { byteBegin_ = pos; }

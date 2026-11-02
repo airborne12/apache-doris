@@ -54,6 +54,20 @@ public:
     DictSegment& operator=(DictSegment&&) noexcept = default;
 
     bool hasNextNode() const;
+    int32_t keyChar() const { return key_char_; }
+    bool isWordEnd() const { return is_word_end_; }
+    template <typename Visitor>
+    void forEachChild(Visitor&& visitor) const {
+        if (store_size_ <= ARRAY_LENGTH_LIMIT) {
+            for (size_t i = 0; i < store_size_; ++i) {
+                visitor(*children_array_[i]);
+            }
+        } else {
+            for (const auto& [key, child] : children_map_) {
+                visitor(*child);
+            }
+        }
+    }
     Hit match(const CharacterUtil::TypedRuneArray& typed_runes, size_t unicode_offset,
               size_t length);
     void match(const CharacterUtil::TypedRuneArray& typed_runes, size_t unicode_offset,

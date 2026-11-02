@@ -17,7 +17,35 @@
 
 #include "storage/index/inverted/analysis/analyzer/ik/dic/DictSegment.h"
 
+#include "storage/index/inverted/analysis/analyzer/ik/dic/FlatDict.h"
+
 namespace doris::segment_v2 {
+
+void FlatDict::build(const DictSegment& root) {
+    std::vector<const DictSegment*> order {&root};
+    _nodes.clear();
+    _nodes.reserve(1 << 20);
+    for (size_t i = 0; i < order.size(); ++i) {
+        const DictSegment* segment = order[i];
+        std::vector<const DictSegment*> children;
+        segment->forEachChild([&](const DictSegment& child) { children.push_back(&child); });
+        std::sort(children.begin(), children.end(),
+                  [](const DictSegment* a, const DictSegment* b) {
+                      return a->keyChar() < b->keyChar();
+                  });
+        _nodes.push_back(Node {segment->keyChar(), static_cast<uint32_t>(order.size()),
+                               static_cast<uint32_t>(children.size()),
+                               segment->isWordEnd() ? 1U : 0U});
+        order.insert(order.end(), children.begin(), children.end());
+    }
+    _root.assign(0x10000, 0);
+    for (uint32_t i = 0; i < _nodes[0].child_count; ++i) {
+        const uint32_t node = _nodes[0].child_begin + i;
+        if (static_cast<uint32_t>(_nodes[node].key) < 0x10000U) {
+            _root[static_cast<uint32_t>(_nodes[node].key)] = node + 1;
+        }
+    }
+}
 
 DictSegment::DictSegment(int32_t key_char) : key_char_(key_char) {
     children_array_.reserve(ARRAY_LENGTH_LIMIT);
