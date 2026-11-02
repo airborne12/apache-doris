@@ -380,6 +380,8 @@ private:
     // total (arena_bytes() + slot_of_.capacity()*4) against reported_resident_.
     MemoryReporter* mem_reporter_ = nullptr;
     int64_t reported_resident_ = 0;
+    // Last arena size given to the global limiter; only used by the SNII_P1 experiment.
+    int64_t reported_global_arena_ = -1;
 
     // Process-wide limiter hookup (null / false = feature off).
     // The registry this buffer joined via attach_global_limiter (borrowed; must

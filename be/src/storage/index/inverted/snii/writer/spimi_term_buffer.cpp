@@ -376,8 +376,18 @@ void SpimiTermBuffer::report_arena_delta() {
     // Report reclaimable arena bytes to the process-wide limiter. It may flag
     // this buffer for a spill, which the owner thread handles after this call.
     if (global_limiter_ != nullptr) {
-        global_limiter_->report(&global_spill_requested_,
-                                static_cast<int64_t>(pool_.arena_bytes()));
+        // Load-benchmark experiment, switched on by SNII_P1. The limiter only sees the arena
+        // size, which grows one 32 KiB block at a time, while this path runs on every change
+        // of the resident total, so once per new term. For example a segment that interns
+        // 4000 new terms into one arena block takes the process-wide mutex 4000 times to
+        // report the same number. Skipping an unchanged arena keeps every value the limiter
+        // can act on and drops the rest.
+        static const bool skip_unchanged_arena = std::getenv("SNII_P1") != nullptr;
+        const auto arena = static_cast<int64_t>(pool_.arena_bytes());
+        if (!skip_unchanged_arena || arena != reported_global_arena_) {
+            global_limiter_->report(&global_spill_requested_, arena);
+            reported_global_arena_ = arena;
+        }
     }
     reported_resident_ = now;
 }

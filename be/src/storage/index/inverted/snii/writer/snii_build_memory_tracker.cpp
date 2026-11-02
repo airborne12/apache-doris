@@ -18,6 +18,8 @@
 #include "storage/index/inverted/snii/writer/snii_build_memory_tracker.h"
 
 #include <atomic>
+#include <cstdlib>
+#include <memory>
 
 #include "common/metrics/doris_metrics.h"
 #include "common/metrics/metrics.h"
@@ -53,6 +55,41 @@ namespace {
 // maintained directly instead of being derived by subtraction, and why it is a
 // plain atomic rather than a second MemTracker.
 std::atomic<int64_t> g_registered_build_bytes {0};
+
+// Load-benchmark experiment, switched on by SNII_P2. Reservations move several times per term,
+// and each move would otherwise touch two process-wide counters from every flush thread. Deltas
+// stay in this per-reporter slot until they reach kCoalesceBytes, so a writer that takes and
+// returns 32 KiB per term never touches the shared cache lines. The destructor publishes the
+// remainder when the reporter goes away, which keeps both counters balanced.
+constexpr int64_t kCoalesceBytes = 1 << 20;
+
+struct CoalescedBuildBytes {
+    CoalescedBuildBytes(doris::MemTracker* tracker_, bool registered_)
+            : tracker(tracker_), registered(registered_) {}
+    ~CoalescedBuildBytes() { publish(pending.exchange(0, std::memory_order_relaxed)); }
+
+    void add(int64_t delta) {
+        const int64_t total = pending.fetch_add(delta, std::memory_order_relaxed) + delta;
+        if (total >= kCoalesceBytes || total <= -kCoalesceBytes) {
+            publish(pending.exchange(0, std::memory_order_relaxed));
+        }
+    }
+
+    void publish(int64_t delta) {
+        if (delta > 0) {
+            tracker->consume(delta);
+        } else if (delta < 0) {
+            tracker->release(-delta);
+        }
+        if (registered && delta != 0) {
+            g_registered_build_bytes.fetch_add(delta, std::memory_order_relaxed);
+        }
+    }
+
+    doris::MemTracker* tracker;
+    const bool registered;
+    std::atomic<int64_t> pending {0};
+};
 } // namespace
 
 int64_t snii_registered_build_bytes() {
@@ -71,6 +108,12 @@ MemoryReporter::ConsumeReleaseFn snii_build_consume_release(BuildMemoryPopulatio
     // combines the two, there is no window in which they can disagree with each
     // other in a way anything can observe.
     const bool registered = population == BuildMemoryPopulation::kRegistered;
+    static const bool coalesce = std::getenv("SNII_P2") != nullptr;
+    if (coalesce) {
+        return [bytes = std::make_shared<CoalescedBuildBytes>(tracker, registered)](int64_t delta) {
+            bytes->add(delta);
+        };
+    }
     return [tracker, registered](int64_t delta) {
         if (delta >= 0) {
             tracker->consume(delta);
