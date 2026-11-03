@@ -28,6 +28,9 @@ namespace doris::segment_v2::inverted_index::analyzer_spike {
 
 // The rules of classify_block as a loop the compiler has to vectorize on its own. The byte masks go
 // through the helper that filters use, so the same source serves AVX2, SSE and NEON.
+// kLeadOnly: a Chinese character is three high bytes and only the first can start a character. A
+// continuation byte alone yields no token, so basic can visit characters instead of bytes.
+template <bool kLeadOnly = false>
 inline void classify_block_auto(const char* __restrict src, char* __restrict dst, uint32_t* alnum,
                                 uint32_t* high) {
     uint8_t alnum_bytes[32];
@@ -38,13 +41,14 @@ inline void classify_block_auto(const char* __restrict src, char* __restrict dst
         const auto is_digit = static_cast<uint8_t>(static_cast<uint8_t>(c - '0') < 10);
         const auto is_upper = static_cast<uint8_t>(static_cast<uint8_t>(c - 'A') < 26);
         alnum_bytes[i] = is_alpha | is_digit;
-        high_bytes[i] = c >> 7;
+        high_bytes[i] = kLeadOnly ? static_cast<uint8_t>(c >= 0xC0) : static_cast<uint8_t>(c >> 7);
         dst[i] = static_cast<char>(c + static_cast<uint8_t>(is_upper << 5));
     }
     *alnum = simd::bytes32_mask_to_bits32_mask(alnum_bytes);
     *high = simd::bytes32_mask_to_bits32_mask(high_bytes);
 }
 
+template <bool kLeadOnly = false>
 inline void classify_auto(std::string_view text, Scratch& s) {
     const size_t n = text.size();
     const size_t words = n / 64 + 2;
@@ -61,8 +65,8 @@ inline void classify_auto(std::string_view text, Scratch& s) {
     size_t w = 0;
     for (; i + 64 <= n; i += 64, ++w) {
         uint32_t a0, h0, a1, h1;
-        classify_block_auto(src + i, dst + i, &a0, &h0);
-        classify_block_auto(src + i + 32, dst + i + 32, &a1, &h1);
+        classify_block_auto<kLeadOnly>(src + i, dst + i, &a0, &h0);
+        classify_block_auto<kLeadOnly>(src + i + 32, dst + i + 32, &a1, &h1);
         s.alnum[w] = a0 | (static_cast<uint64_t>(a1) << 32);
         s.high[w] = h0 | (static_cast<uint64_t>(h1) << 32);
     }
@@ -72,8 +76,8 @@ inline void classify_auto(std::string_view text, Scratch& s) {
         char out[64];
         memcpy(in, src + i, rest);
         uint32_t a0, h0, a1, h1;
-        classify_block_auto(in, out, &a0, &h0);
-        classify_block_auto(in + 32, out + 32, &a1, &h1);
+        classify_block_auto<kLeadOnly>(in, out, &a0, &h0);
+        classify_block_auto<kLeadOnly>(in + 32, out + 32, &a1, &h1);
         memcpy(dst + i, out, rest);
         const uint64_t mask = (1ULL << rest) - 1;
         s.alnum[w] = (a0 | (static_cast<uint64_t>(a1) << 32)) & mask;
@@ -91,6 +95,11 @@ inline void english_auto(std::string_view text, Scratch& s) {
 
 inline void basic_auto(std::string_view text, Scratch& s) {
     classify_auto(text, s);
+    basic_scan(text, s);
+}
+
+inline void basic_lead(std::string_view text, Scratch& s) {
+    classify_auto<true>(text, s);
     basic_scan(text, s);
 }
 
@@ -127,6 +136,108 @@ inline void chinese_fine_simd(std::string_view text, Scratch& s) {
     FlatJieba::simd_child = true;
     chinese_fine(text, s);
     FlatJieba::simd_child = false;
+}
+
+// The batch kernels with no vector code at all: table lookups and a byte loop, the best plain shape
+// for each. Against the kernels above they show what SIMD itself is worth, and against the old
+// analyzers they show what the batch rewrite is worth without it.
+struct ScalarTables {
+    std::array<uint8_t, 256> alnum {};
+    std::array<uint8_t, 256> lower {};
+
+    ScalarTables() {
+        for (int c = 0; c < 256; ++c) {
+            alnum[c] = (c >= '0' && c <= '9') || (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z');
+            lower[c] = static_cast<uint8_t>(c >= 'A' && c <= 'Z' ? c + 32 : c);
+        }
+    }
+};
+
+inline const ScalarTables& scalar_tables() {
+    static const ScalarTables tables;
+    return tables;
+}
+
+inline void english_scalar(std::string_view text, Scratch& s) {
+    s.tokens.clear();
+    const size_t n = text.size();
+    if (s.lowered.size() < n + 64) {
+        s.lowered.resize((n + 64) * 2);
+    }
+    const ScalarTables& tables = scalar_tables();
+    const auto* src = reinterpret_cast<const uint8_t*>(text.data());
+    char* dst = s.lowered.data();
+    size_t i = 0;
+    while (i < n) {
+        if (tables.alnum[src[i]] == 0) {
+            ++i;
+            continue;
+        }
+        size_t start = i;
+        do {
+            dst[i] = static_cast<char>(tables.lower[src[i]]);
+            ++i;
+        } while (i < n && tables.alnum[src[i]] != 0);
+        while (i - start > 255) {
+            s.tokens.push_back({dst + start, 255, 1});
+            start += 255;
+        }
+        s.tokens.push_back({dst + start, static_cast<uint32_t>(i - start), 1});
+    }
+}
+
+inline void basic_scalar(std::string_view text, Scratch& s) {
+    s.tokens.clear();
+    const auto n = static_cast<int32_t>(text.size());
+    if (s.lowered.size() < text.size() + 64) {
+        s.lowered.resize((text.size() + 64) * 2);
+    }
+    const ScalarTables& tables = scalar_tables();
+    const auto* src = reinterpret_cast<const uint8_t*>(text.data());
+    char* dst = s.lowered.data();
+    int32_t i = 0;
+    while (i < n) {
+        const uint8_t c = src[i];
+        if (c < 0x80) {
+            if (tables.alnum[c] == 0) {
+                ++i;
+                continue;
+            }
+            const int32_t start = i;
+            do {
+                dst[i] = static_cast<char>(tables.lower[src[i]]);
+                ++i;
+            } while (i < n && tables.alnum[src[i]] != 0);
+            s.tokens.push_back(
+                    {dst + start, static_cast<uint32_t>(std::min<int32_t>(i - start, 255)), 1});
+        } else {
+            int32_t next = i;
+            UChar32 cp = U_UNASSIGNED;
+            U8_NEXT(src, next, n, cp);
+            if (cp >= 0 && is_cjk(cp)) {
+                s.tokens.push_back({text.data() + i, static_cast<uint32_t>(next - i), 1});
+            }
+            i = next;
+        }
+    }
+}
+
+inline void standard_scalar(std::string_view text, Scratch& s) {
+    s.tokens.clear();
+    if (StringUtil::validate_utf8(text) != 0 && !simdutf::validate_utf8(text.data(), text.size())) {
+        return;
+    }
+    const size_t n = text.size();
+    if (s.lowered.size() < n + 32) {
+        s.lowered.resize((n + 32) * 2);
+    }
+    const ScalarTables& tables = scalar_tables();
+    const auto* src = reinterpret_cast<const uint8_t*>(text.data());
+    char* dst = s.lowered.data();
+    for (size_t i = 0; i < n; ++i) {
+        dst[i] = static_cast<char>(tables.lower[src[i]]);
+    }
+    standard_scan(dst, static_cast<int32_t>(n), s);
 }
 
 // A Block's worth of rows at a time, as SniiIndexColumnWriter::add_values receives them: `chars` is

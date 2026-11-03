@@ -821,6 +821,14 @@ inline const bool registered = [] {
                  config::inverted_index_dict_path = std::getenv("ANALYZER_BENCH_DICT_DIR");
                  return builtin(InvertedIndexParserType::PARSER_IK, INVERTED_INDEX_PARSER_MAX_WORD);
              }},
+            {"basic_lead", basic_lead,
+             [] { return builtin(InvertedIndexParserType::PARSER_BASIC); }},
+            {"english_scalar", english_scalar,
+             [] { return builtin(InvertedIndexParserType::PARSER_ENGLISH); }},
+            {"basic_scalar", basic_scalar,
+             [] { return builtin(InvertedIndexParserType::PARSER_BASIC); }},
+            {"standard_scalar", standard_scalar,
+             [] { return builtin(InvertedIndexParserType::PARSER_STANDARD); }},
             {"english_auto", english_auto,
              [] { return builtin(InvertedIndexParserType::PARSER_ENGLISH); }},
             {"basic_auto", basic_auto,
