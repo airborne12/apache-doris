@@ -46,6 +46,7 @@ struct Scratch {
     std::vector<uint64_t> high;
     std::vector<TokenRef> tokens;
     std::deque<std::string> owned;
+    bool block_valid = false;
 };
 
 inline void classify_block(const char* src, char* dst, uint32_t* alnum, uint32_t* high) {
@@ -104,8 +105,7 @@ inline void classify(std::string_view text, Scratch& s) {
     s.high[w] = 0;
 }
 
-inline void english(std::string_view text, Scratch& s) {
-    classify(text, s);
+inline void english_scan(std::string_view text, Scratch& s) {
     s.tokens.clear();
     const char* base = s.lowered.data();
     const size_t words = (text.size() + 63) / 64;
@@ -138,6 +138,11 @@ inline void english(std::string_view text, Scratch& s) {
     }
 }
 
+inline void english(std::string_view text, Scratch& s) {
+    classify(text, s);
+    english_scan(text, s);
+}
+
 inline bool is_cjk(UChar32 c) {
     const auto in = [c](uint32_t lo, uint32_t hi) {
         return static_cast<uint32_t>(c) - lo <= hi - lo;
@@ -146,8 +151,7 @@ inline bool is_cjk(UChar32 c) {
            in(0x2A700, 0x2EBEF) || in(0x30000, 0x3134A);
 }
 
-inline void basic(std::string_view text, Scratch& s) {
-    classify(text, s);
+inline void basic_scan(std::string_view text, Scratch& s) {
     s.tokens.clear();
     const char* base = s.lowered.data();
     const auto n = static_cast<int32_t>(text.size());
@@ -190,6 +194,11 @@ inline void basic(std::string_view text, Scratch& s) {
         s.tokens.push_back({base + run_start,
                             static_cast<uint32_t>(std::min<int64_t>(n - run_start, 255)), 1});
     }
+}
+
+inline void basic(std::string_view text, Scratch& s) {
+    classify(text, s);
+    basic_scan(text, s);
 }
 
 // The JFlex tables flattened: states 59, classes 29, so one byte per transition.
@@ -288,15 +297,9 @@ inline bool is_stop_word(std::string_view term) {
     return term.size() <= 5 && words.count(term) != 0;
 }
 
-inline void standard(std::string_view text, Scratch& s) {
-    s.tokens.clear();
-    if (!accepted(text)) {
-        return;
-    }
-    lower_copy(text, s);
+inline void standard_scan(const char* lowered, int32_t n, Scratch& s) {
     const DenseDfa& table = dfa();
-    const auto* p = reinterpret_cast<const uint8_t*>(s.lowered.data());
-    const auto n = static_cast<int32_t>(text.size());
+    const auto* p = reinterpret_cast<const uint8_t*>(lowered);
     int32_t pos = 0;
     while (pos < n) {
         const int32_t start = pos;
@@ -337,7 +340,7 @@ inline void standard(std::string_view text, Scratch& s) {
         if (size > 255) {
             continue;
         }
-        const char* data = s.lowered.data() + start;
+        const char* data = lowered + start;
         if (action != 3) {
             // Only WORD is lowercased by the old tokenizer. Every other type is free of ASCII
             // letters, so the lowered copy is byte-identical for them.
@@ -346,6 +349,15 @@ inline void standard(std::string_view text, Scratch& s) {
             s.tokens.push_back({data, size, 1});
         }
     }
+}
+
+inline void standard(std::string_view text, Scratch& s) {
+    s.tokens.clear();
+    if (!accepted(text)) {
+        return;
+    }
+    lower_copy(text, s);
+    standard_scan(s.lowered.data(), static_cast<int32_t>(text.size()), s);
 }
 
 inline bool has_high_byte(const char* p, size_t n) {
@@ -674,9 +686,9 @@ inline void ik_spike(std::string_view text, Scratch& s) {
     static thread_local ReaderPtr reader;
     if (analyzer == nullptr) {
         config::inverted_index_dict_path = std::getenv("ANALYZER_BENCH_DICT_DIR");
-        analyzer = analyzer_benchmark::builtin(InvertedIndexParserType::PARSER_IK,
-                                               kSmart ? INVERTED_INDEX_PARSER_SMART
-                                                      : INVERTED_INDEX_PARSER_MAX_WORD);
+        analyzer = analyzer_benchmark::builtin(
+                InvertedIndexParserType::PARSER_IK,
+                kSmart ? INVERTED_INDEX_PARSER_SMART : INVERTED_INDEX_PARSER_MAX_WORD);
         reader = InvertedIndexAnalyzer::create_reader({});
         Dictionary::getSingleton()->buildFlat();
     }
@@ -768,6 +780,12 @@ inline void verify_kernel(benchmark::State& state, Kernel kernel,
     state.counters["compared_tokens"] = static_cast<double>(compared_tokens);
 }
 
+} // namespace doris::segment_v2::inverted_index::analyzer_spike
+
+#include "benchmark_analyzer_spike_simd.hpp"
+
+namespace doris::segment_v2::inverted_index::analyzer_spike {
+
 inline const bool registered = [] {
     const char* directory = std::getenv("ANALYZER_BENCH_CORPUS_DIR");
     if (directory == nullptr) {
@@ -803,6 +821,24 @@ inline const bool registered = [] {
                  config::inverted_index_dict_path = std::getenv("ANALYZER_BENCH_DICT_DIR");
                  return builtin(InvertedIndexParserType::PARSER_IK, INVERTED_INDEX_PARSER_MAX_WORD);
              }},
+            {"english_auto", english_auto,
+             [] { return builtin(InvertedIndexParserType::PARSER_ENGLISH); }},
+            {"basic_auto", basic_auto,
+             [] { return builtin(InvertedIndexParserType::PARSER_BASIC); }},
+            {"standard_auto", standard_auto,
+             [] { return builtin(InvertedIndexParserType::PARSER_STANDARD); }},
+            {"chinese_coarse_simd", chinese_coarse_simd,
+             [] {
+                 config::inverted_index_dict_path = std::getenv("ANALYZER_BENCH_DICT_DIR");
+                 return builtin(InvertedIndexParserType::PARSER_CHINESE,
+                                INVERTED_INDEX_PARSER_COARSE_GRANULARITY);
+             }},
+            {"chinese_fine_simd", chinese_fine_simd,
+             [] {
+                 config::inverted_index_dict_path = std::getenv("ANALYZER_BENCH_DICT_DIR");
+                 return builtin(InvertedIndexParserType::PARSER_CHINESE,
+                                INVERTED_INDEX_PARSER_FINE_GRANULARITY);
+             }},
             {"kuromoji", kuromoji_spike,
              [] {
                  config::inverted_index_dict_path = std::getenv("ANALYZER_BENCH_DICT_DIR");
@@ -831,6 +867,34 @@ inline const bool registered = [] {
         }
         auto corpus = analyzer_benchmark::load_corpus(entry.path(), max_bytes);
         const std::string corpus_name = entry.path().stem().string();
+        struct BlockCase {
+            const char* name;
+            BlockPrepare prepare;
+            BlockRow row;
+            Kernel oracle;
+        };
+        const std::vector<BlockCase> block_cases {
+                {"english_block", prepare_classify, english_row, english},
+                {"basic_block", prepare_classify, basic_row, basic},
+                {"standard_block", prepare_standard, standard_row, standard}};
+        for (const BlockCase& item : block_cases) {
+            const std::string label = std::string(item.name) + "/" + corpus_name;
+            const BlockPrepare prepare = item.prepare;
+            const BlockRow row = item.row;
+            const Kernel oracle = item.oracle;
+            benchmark::RegisterBenchmark(("spike/" + label).c_str(),
+                                         [prepare, row, corpus](benchmark::State& state) {
+                                             run_block(state, prepare, row, corpus);
+                                         })
+                    ->Unit(benchmark::kMillisecond)
+                    ->MinTime(1.0);
+            benchmark::RegisterBenchmark(("verify/" + label).c_str(),
+                                         [prepare, row, oracle, corpus](benchmark::State& state) {
+                                             verify_block(state, prepare, row, oracle, corpus);
+                                         })
+                    ->Unit(benchmark::kMillisecond)
+                    ->Iterations(1);
+        }
         for (const Case& item : cases) {
             const Kernel kernel = item.kernel;
             const auto factory = item.factory;

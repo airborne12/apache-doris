@@ -38,6 +38,8 @@
 namespace doris::segment_v2::inverted_index::analyzer_spike {
 
 struct FlatJieba {
+    inline static bool simd_child = false; // compares up to 8 children in one vector
+
     // Breadth first, so the children of a node are the consecutive ids
     // child_begin[n] .. child_begin[n] + child_count[n] - 1, ordered by rune.
     std::vector<uint32_t> child_begin;
@@ -131,6 +133,14 @@ struct FlatJieba {
         const uint32_t first = child_begin[node];
         const uint32_t* base = key.data() + first;
         if (n <= 8) {
+            if (simd_child) {
+                const __m256i keys = _mm256_loadu_si256(reinterpret_cast<const __m256i*>(base));
+                const __m256i wanted = _mm256_set1_epi32(static_cast<int>(rune));
+                const auto hits = static_cast<uint32_t>(
+                        _mm256_movemask_ps(_mm256_castsi256_ps(_mm256_cmpeq_epi32(keys, wanted))));
+                const uint32_t live = hits & ((1U << n) - 1);
+                return live != 0 ? first + static_cast<uint32_t>(__builtin_ctz(live)) : 0;
+            }
             for (uint32_t i = 0; i < n; ++i) {
                 if (base[i] == rune) {
                     return first + i;
@@ -191,6 +201,7 @@ inline const FlatJieba& flat_jieba() {
             }
         }
         f.root_bmp.assign(0x10000, 0);
+        f.key.resize(f.key.size() + 8); // the vector compare may read past the last node
         for (uint32_t i = 0; i < f.child_count[0]; ++i) {
             const uint32_t id = f.child_begin[0] + i;
             if (f.key[id] < 0x10000) {
@@ -270,11 +281,12 @@ inline bool decode_runes(std::string_view text, JiebaScratch& j) {
             r = (static_cast<uint32_t>(c & 0x1f) << 6) | (s[i + 1] & 0x3f);
             len = 2;
         } else if (c <= 0xef && 2 < rest) {
-            r = (static_cast<uint32_t>(c & 0x0f) << 12) | (static_cast<uint32_t>(s[i + 1] & 0x3f) << 6) |
-                (s[i + 2] & 0x3f);
+            r = (static_cast<uint32_t>(c & 0x0f) << 12) |
+                (static_cast<uint32_t>(s[i + 1] & 0x3f) << 6) | (s[i + 2] & 0x3f);
             len = 3;
         } else if (c <= 0xf7 && 3 < rest) {
-            r = (static_cast<uint32_t>(c & 0x07) << 18) | (static_cast<uint32_t>(s[i + 1] & 0x3f) << 12) |
+            r = (static_cast<uint32_t>(c & 0x07) << 18) |
+                (static_cast<uint32_t>(s[i + 1] & 0x3f) << 12) |
                 (static_cast<uint32_t>(s[i + 2] & 0x3f) << 6) | (s[i + 3] & 0x3f);
             len = 4;
         } else {
@@ -458,7 +470,8 @@ inline void mix_cut(const FlatJieba& f, JiebaScratch& j, uint32_t lo, uint32_t h
             continue;
         }
         size_t k = i;
-        while (k < mp.size() && mp[k].first == mp[k].second && !f.is_user_single(j.rune[mp[k].first])) {
+        while (k < mp.size() && mp[k].first == mp[k].second &&
+               !f.is_user_single(j.rune[mp[k].first])) {
             ++k;
         }
         hmm_cut(f, j, mp[i].first, mp[k - 1].first + 1);
