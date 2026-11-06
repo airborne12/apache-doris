@@ -19,9 +19,14 @@
 
 #include <gtest/gtest.h>
 
+#include <cstdint>
 #include <memory>
+#include <string>
+#include <utility>
+#include <vector>
 
 #include "storage/index/inverted/analysis/reader.h"
+#include "storage/index/inverted/analysis/tokenizer/basic/basic_tokenizer_factory.h"
 
 using namespace lucene::analysis;
 
@@ -55,12 +60,66 @@ public:
     }
 };
 
+// Moves every offset it corrects by a fixed amount, so a test sees whether a tokenizer asked it:
+// "ab" at [0, 2) comes out at [100, 102) with a shift of 100.
+class ShiftingCharFilter final : public MockDorisCharFilter {
+public:
+    ShiftingCharFilter(ReaderPtr reader, int32_t shift)
+            : MockDorisCharFilter(std::move(reader)), _shift(shift) {}
+
+    size_t size() override { return _reader->size(); }
+
+    int32_t correct_offset(int32_t current_offset) const override {
+        return current_offset + _shift;
+    }
+
+    int32_t correct_start_offset(int32_t current_offset) const override {
+        return current_offset + _shift;
+    }
+
+private:
+    const int32_t _shift;
+};
+
 class DorisCharFilterTest : public ::testing::Test {
 protected:
     void SetUp() override { _mock_reader = std::make_shared<lucene::util::SStringReader<char>>(); }
 
     ReaderPtr _mock_reader;
 };
+
+// A tokenizer looks its char filter up in reset(), once per value: the offsets of a value read
+// through a char filter are corrected, and those of a value read straight are not, whatever the
+// reader of the value before was.
+TEST_F(DorisCharFilterTest, TokenizerCorrectsTheOffsetsOfEachValueByItsOwnReader) {
+    using Offsets = std::vector<std::pair<int32_t, int32_t>>;
+    const std::string text = "ab cd";
+    BasicTokenizerFactory factory;
+    factory.initialize(Settings());
+    auto tokenizer = factory.create();
+    auto plain_reader = [&text] {
+        ReaderPtr reader = std::make_shared<lucene::util::SStringReader<char>>();
+        reader->init(text.data(), static_cast<int32_t>(text.size()), false);
+        return reader;
+    };
+    auto shifting_reader = [&plain_reader](int32_t shift) -> ReaderPtr {
+        return std::make_shared<ShiftingCharFilter>(plain_reader(), shift);
+    };
+    auto offsets_of = [&tokenizer](const ReaderPtr& reader) {
+        tokenizer->set_reader(reader);
+        tokenizer->reset();
+        Offsets offsets;
+        Token token;
+        while (tokenizer->next(&token) != nullptr) {
+            offsets.emplace_back(token.startOffset(), token.endOffset());
+        }
+        return offsets;
+    };
+
+    EXPECT_EQ(offsets_of(shifting_reader(100)), (Offsets {{100, 102}, {103, 105}}));
+    EXPECT_EQ(offsets_of(plain_reader()), (Offsets {{0, 2}, {3, 5}}));
+    EXPECT_EQ(offsets_of(shifting_reader(7)), (Offsets {{7, 9}, {10, 12}}));
+}
 
 TEST_F(DorisCharFilterTest, ExceptionThrowing) {
     auto filter = std::make_shared<MockDorisCharFilter>(_mock_reader);
